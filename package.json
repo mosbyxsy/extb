@@ -1,5 +1,5 @@
 {
-  "name": "extbuilder",
+  "name": "@mosbydev/extbuilder",
   "version": "0.1.0",
   "description": "A safe, configurable packager for browser extension source directories.",
   "type": "module",
