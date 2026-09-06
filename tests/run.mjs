@@ -1,0 +1,596 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import vm from 'node:vm';
+import yauzl from 'yauzl';
+import { build, loadConfig } from '../lib/index.js';
+import { runCli } from '../lib/cli-runner.js';
+
+// 使用极小的串行测试运行器，避免引入需要额外转译进程的测试框架。
+// 每个测试直接导入 lib/ 发布代码，因此测试对象与 npm tarball 中的运行代码一致。
+const tests = [];
+
+function test(name, run) {
+  tests.push({ name, run });
+}
+
+async function withTemporaryDirectory(run) {
+  // 每个场景使用独立临时目录，并在成功或失败后统一清理，防止测试相互污染。
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'extbuilder-test-'));
+  try {
+    return await run(directory);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function write(directory, relativePath, content) {
+  // 测试夹具统一使用 POSIX 相对路径，再转换成当前平台的真实路径。
+  const filePath = path.join(directory, ...relativePath.split('/'));
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, content);
+}
+
+async function createExtension(directory, version = '1.2.3') {
+  // 该夹具同时覆盖 manifest 引用、HTML 内联资源、独立 JS/CSS 和二进制资源。
+  await write(
+    directory,
+    'manifest.json',
+    JSON.stringify(
+      {
+        manifest_version: 3,
+        name: 'Fixture Extension',
+        version,
+        action: { default_popup: 'popup.html' },
+        background: { service_worker: 'scripts/background.js' },
+      },
+      null,
+      2,
+    ),
+  );
+  await write(
+    directory,
+    'popup.html',
+    `<!doctype html>
+<html>
+  <head>
+    <link rel="stylesheet" href="styles/popup.css">
+    <style> .inline { color: rgb(255, 0, 0); } </style>
+  </head>
+  <body>
+    <p>Hello <strong>extension</strong></p>
+    <script>function inlineValue() { return 2 + 2; } globalThis.inlineResult = inlineValue();</script>
+    <script src="scripts/background.js"></script>
+  </body>
+</html>`,
+  );
+  await write(
+    directory,
+    'scripts/background.js',
+    `/*! license */
+// removable comment
+function publicBackgroundName(inputValue) {
+  const localLongName = inputValue + 1;
+  return localLongName;
+}
+globalThis.runExtension = publicBackgroundName;
+`,
+  );
+  await write(
+    directory,
+    'styles/popup.css',
+    `.icon {
+  color: rgb(255, 0, 0);
+  background-image: url('../images/icon.bin');
+}
+`,
+  );
+  await write(directory, 'images/icon.bin', Buffer.from([0, 1, 2, 255, 128, 64]));
+  // 这些开发文件没有进入依赖图，必须留在源码目录而不能出现在产物中。
+  await write(directory, '.idea/workspace.xml', '<project />');
+  await write(directory, 'notes.txt', 'development notes');
+  await write(directory, 'scripts/unused.js', 'globalThis.shouldNotShip = true;');
+}
+
+async function zipEntries(zipPath) {
+  // 懒读取 ZIP 中央目录即可验证条目，不需要把文件内容解压到磁盘。
+  return new Promise((resolve, reject) => {
+    yauzl.open(zipPath, { lazyEntries: true }, (error, zipFile) => {
+      if (error || !zipFile) {
+        reject(error ?? new Error('ZIP could not be opened'));
+        return;
+      }
+      const entries = [];
+      zipFile.once('error', reject);
+      zipFile.once('end', () => resolve(entries));
+      zipFile.on('entry', (entry) => {
+        entries.push(entry.fileName);
+        zipFile.readEntry();
+      });
+      zipFile.readEntry();
+    });
+  });
+}
+
+test('uses safe configuration defaults', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const resolved = await loadConfig({ cwd: root, configFile: false });
+    assert.equal(resolved.root, root);
+    assert.equal(resolved.outDir, path.join(root, 'dist'));
+    assert.deepEqual(
+      { enabled: resolved.minify.enabled, html: resolved.minify.html, js: resolved.minify.js, css: resolved.minify.css },
+      { enabled: true, html: true, js: true, css: true },
+    );
+    assert.equal(resolved.obfuscate.enabled, false);
+    assert.equal(resolved.obfuscate.mode, 'safe');
+    assert.deepEqual(resolved.transpile, { enabled: false, target: 'modern', exclude: [] });
+    assert.equal(resolved.zip.enabled, true);
+  });
+});
+
+test('rejects ambiguous automatic config discovery', async () => {
+  await withTemporaryDirectory(async (root) => {
+    await writeFile(path.join(root, 'extbuilder.config.json'), '{}');
+    await writeFile(path.join(root, 'extbuilder.config.mjs'), 'export default {};');
+    await assert.rejects(() => loadConfig({ cwd: root }), /多个 extbuilder 配置文件/);
+  });
+});
+
+test('resolves config paths relative to the config file', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const configDirectory = path.join(root, 'config');
+    await mkdir(configDirectory);
+    await writeFile(
+      path.join(configDirectory, 'custom.json'),
+      JSON.stringify({ root: '../extension', outDir: '../release', manifest: '../extension/manifest.json' }),
+    );
+    const resolved = await loadConfig({ cwd: root, configFile: './config/custom.json' });
+    assert.equal(resolved.root, path.join(root, 'extension'));
+    assert.equal(resolved.outDir, path.join(root, 'release'));
+    assert.equal(resolved.manifest, path.join(root, 'extension', 'manifest.json'));
+  });
+});
+
+test('finds a nested manifest, preserves paths, minifies files, copies binary data, and creates a ZIP', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'sample-extension');
+    await createExtension(extension);
+    const manifestBefore = await readFile(path.join(extension, 'manifest.json'));
+    const binaryBefore = await readFile(path.join(extension, 'images/icon.bin'));
+
+    const result = await build({ cwd: root });
+    assert.equal(result.outDir, path.join(root, 'dist'));
+    assert.equal(result.zipPath, path.join(root, 'dist', 'sample-extension-1.2.3.zip'));
+    assert.deepEqual(await readFile(path.join(result.outDir, 'manifest.json')), manifestBefore);
+    assert.deepEqual(await readFile(path.join(result.outDir, 'images/icon.bin')), binaryBefore);
+    await assert.rejects(() => readFile(path.join(result.outDir, '.idea/workspace.xml')));
+    await assert.rejects(() => readFile(path.join(result.outDir, 'notes.txt')));
+    await assert.rejects(() => readFile(path.join(result.outDir, 'scripts/unused.js')));
+
+    const html = await readFile(path.join(result.outDir, 'popup.html'), 'utf8');
+    const javaScript = await readFile(path.join(result.outDir, 'scripts/background.js'), 'utf8');
+    const css = await readFile(path.join(result.outDir, 'styles/popup.css'), 'utf8');
+    assert.match(html, /src="scripts\/background\.js"/);
+    assert.match(html, /href="styles\/popup\.css"/);
+    assert.match(javaScript, /publicBackgroundName/);
+    assert.match(javaScript, /\/\*! license \*\//);
+    assert.doesNotMatch(javaScript, /removable comment/);
+    assert.match(css, /url\(['"]?\.\.\/images\/icon\.bin['"]?\)/);
+    assert.ok(css.length < 100);
+
+    const entries = await zipEntries(result.zipPath);
+    assert.deepEqual(
+      entries.sort(),
+      ['images/icon.bin', 'manifest.json', 'popup.html', 'scripts/background.js', 'styles/popup.css'].sort(),
+    );
+    assert.ok(entries.every((entry) => !entry.endsWith('.zip')));
+    assert.deepEqual(result.files, { copied: 2, html: 1, js: 1, css: 1, obfuscated: 0, transpiled: 0 });
+    assert.ok(result.bytesAfter < result.bytesBefore);
+  });
+});
+
+test('reports multiple manifests and accepts an explicit manifest', async () => {
+  await withTemporaryDirectory(async (root) => {
+    await createExtension(path.join(root, 'one'));
+    await createExtension(path.join(root, 'two'));
+    await assert.rejects(() => build({ cwd: root, zip: false }), /多个 manifest\.json/);
+
+    const result = await build({
+      cwd: root,
+      manifest: './two/manifest.json',
+      outDir: './selected',
+      minify: false,
+      zip: false,
+    });
+    assert.equal(result.sourceDir, path.join(root, 'two'));
+    assert.match(await readFile(path.join(result.outDir, 'scripts/background.js'), 'utf8'), /removable comment/);
+  });
+});
+
+test('recursively follows JavaScript modules, runtime URLs, workers, DNR redirects, and resource globs', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await write(
+      extension,
+      'manifest.json',
+      JSON.stringify({
+        manifest_version: 3,
+        name: 'Dependency Graph',
+        version: '1.0.0',
+        default_locale: 'en',
+        background: { service_worker: 'main.mjs', type: 'module' },
+        declarative_net_request: {
+          rule_resources: [{ id: 'rules', enabled: true, path: 'rules/rules.json' }],
+        },
+        web_accessible_resources: [{ resources: ['public/*'], matches: ['<all_urls>'] }],
+      }),
+    );
+    await write(
+      extension,
+      'main.mjs',
+      `import { value } from './scripts/helper.mjs';
+       const worker = new Worker('./workers/task.js');
+       globalThis.icon = chrome.runtime.getURL('assets/icon.svg');
+       globalThis.value = value;
+       void worker;`,
+    );
+    await write(extension, 'scripts/helper.mjs', `export const value = fetch('../data/value.json');`);
+    await write(extension, 'workers/task.js', `importScripts('../workers/vendor.js');`);
+    await write(extension, 'workers/vendor.js', `globalThis.vendorLoaded = true;`);
+    await write(extension, 'assets/icon.svg', '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    await write(extension, 'data/value.json', '{"value":1}');
+    await write(
+      extension,
+      'rules/rules.json',
+      JSON.stringify([{ id: 1, priority: 1, action: { type: 'redirect', redirect: { extensionPath: '/redirect.html' } } }]),
+    );
+    await write(extension, 'redirect.html', '<!doctype html><link rel="stylesheet" href="redirect.css">');
+    await write(extension, 'redirect.css', '.redirect{background:url("assets/redirect.png")}');
+    await write(extension, 'assets/redirect.png', Buffer.from([1, 2, 3]));
+    await write(extension, 'public/nested/exposed.js', 'globalThis.exposed = true;');
+    await write(extension, '_locales/en/messages.json', '{"name":{"message":"Dependency Graph"}}');
+    await write(extension, 'private/not-required.txt', 'do not ship');
+
+    const result = await build({ cwd: root, root: './extension', zip: false });
+    for (const required of [
+      'main.mjs',
+      'scripts/helper.mjs',
+      'workers/task.js',
+      'workers/vendor.js',
+      'assets/icon.svg',
+      'data/value.json',
+      'rules/rules.json',
+      'redirect.html',
+      'redirect.css',
+      'assets/redirect.png',
+      'public/nested/exposed.js',
+      '_locales/en/messages.json',
+    ]) {
+      await readFile(path.join(result.outDir, ...required.split('/')));
+    }
+    await assert.rejects(() => readFile(path.join(result.outDir, 'private/not-required.txt')));
+  });
+});
+
+test('supports include globs for dynamic resources and continues tracing included entries', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await write(
+      extension,
+      'manifest.json',
+      JSON.stringify({ manifest_version: 3, name: 'Dynamic Resources', version: '1.0.0', background: { service_worker: 'loader.js' } }),
+    );
+    await write(extension, 'loader.js', "const name = 'settings'; chrome.runtime.getURL(`data/${name}.json`);");
+    await write(extension, 'data/settings.json', '{"enabled":true}');
+    await write(extension, 'dynamic/page.html', '<script src="page.js"></script>');
+    await write(extension, 'dynamic/page.js', 'globalThis.dynamicPage = true;');
+    await write(extension, 'unrelated.txt', 'do not ship');
+
+    const result = await build({
+      cwd: root,
+      root: './extension',
+      include: ['data/**', 'dynamic/page.html'],
+      zip: false,
+    });
+    await readFile(path.join(result.outDir, 'data/settings.json'));
+    await readFile(path.join(result.outDir, 'dynamic/page.html'));
+    await readFile(path.join(result.outDir, 'dynamic/page.js'));
+    await assert.rejects(() => readFile(path.join(result.outDir, 'unrelated.txt')));
+  });
+});
+
+test('fails instead of producing an incomplete package when a required resource is missing', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await write(
+      extension,
+      'manifest.json',
+      JSON.stringify({ manifest_version: 3, name: 'Missing Resource', version: '1.0.0', action: { default_popup: 'missing.html' } }),
+    );
+    await assert.rejects(() => build({ cwd: root, root: './extension', zip: false }), /必需资源不存在.*missing\.html/s);
+  });
+});
+
+test('loads TypeScript config and applies programmatic overrides', async () => {
+  await withTemporaryDirectory(async (root) => {
+    await createExtension(path.join(root, 'extension'));
+    await write(
+      root,
+      'extbuilder.config.ts',
+      `export default {
+        root: './extension',
+        outDir: './from-config',
+        minify: false,
+        zip: false,
+      };`,
+    );
+    const loaded = await loadConfig({ cwd: root });
+    assert.equal(loaded.root, path.join(root, 'extension'));
+    assert.equal(loaded.minify.js, false);
+
+    const result = await build({
+      cwd: root,
+      outDir: './from-options',
+      minify: { js: true, html: false, css: false },
+    });
+    assert.equal(result.outDir, path.join(root, 'from-options'));
+    assert.equal(result.zipPath, undefined);
+    assert.match(await readFile(path.join(result.outDir, 'popup.html'), 'utf8'), /\n  <head>/);
+    assert.doesNotMatch(await readFile(path.join(result.outDir, 'scripts/background.js'), 'utf8'), /removable comment/);
+    assert.match(await readFile(path.join(result.outDir, 'styles/popup.css'), 'utf8'), /\n  color:/);
+  });
+});
+
+test('obfuscates local identifiers while preserving behavior and public names', async () => {
+  await withTemporaryDirectory(async (root) => {
+    await createExtension(path.join(root, 'extension'));
+    const result = await build({
+      cwd: root,
+      root: './extension',
+      obfuscate: { enabled: true, reservedNames: ['inputValue'] },
+      zip: false,
+    });
+    const output = await readFile(path.join(result.outDir, 'scripts/background.js'), 'utf8');
+    assert.match(output, /publicBackgroundName/);
+    assert.match(output, /inputValue/);
+    assert.doesNotMatch(output, /localLongName/);
+    const context = vm.createContext({});
+    vm.runInContext(output, context);
+    assert.equal(context.runExtension(5), 6);
+    assert.equal(result.files.obfuscated, 2);
+  });
+});
+
+test('transpiles modern JavaScript syntax to ES5 while preserving behavior', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await write(
+      extension,
+      'manifest.json',
+      JSON.stringify({
+        manifest_version: 2,
+        name: 'ES5 Fixture',
+        version: '1.0.0',
+        background: { scripts: ['modern.js'] },
+        browser_action: { default_popup: 'popup.html' },
+      }),
+    );
+    await write(
+      extension,
+      'modern.js',
+      `const readValue = (input = {}) => {
+        const record = { ...input };
+        return record?.value ?? 7;
+      };
+      globalThis.es5Result = readValue({ value: 3 });`,
+    );
+    await write(
+      extension,
+      'popup.html',
+      `<script>const inlineModernFunction = (value = 4) => value + 1;
+      globalThis.inlineEs5Result = inlineModernFunction();</script>`,
+    );
+
+    const result = await build({ cwd: root, root: './extension', transpile: true, zip: false });
+    const output = await readFile(path.join(result.outDir, 'modern.js'), 'utf8');
+    const htmlOutput = await readFile(path.join(result.outDir, 'popup.html'), 'utf8');
+    assert.doesNotMatch(output, /\bconst\b|=>|\?\.|\?\?/);
+    assert.doesNotMatch(htmlOutput, /\bconst\b|=>/);
+    assert.match(output, /\bvar\b/);
+    const context = vm.createContext({});
+    vm.runInContext(output, context);
+    vm.runInContext(htmlOutput.match(/<script>(.*?)<\/script>/s)[1], context);
+    assert.equal(context.es5Result, 3);
+    assert.equal(context.inlineEs5Result, 5);
+    assert.equal(result.files.transpiled, 2);
+  });
+});
+
+test('supports aggressive compression and top-level identifier obfuscation', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await write(
+      extension,
+      'manifest.json',
+      JSON.stringify({
+        manifest_version: 3,
+        name: 'Aggressive Fixture',
+        version: '1.0.0',
+        background: { service_worker: 'aggressive.js' },
+      }),
+    );
+    const source = `function calculatePublicResult(inputValue) {
+      const veryLongIntermediateName = inputValue * 2;
+      if (false) console.log('dead code');
+      return veryLongIntermediateName;
+    }
+    globalThis.aggressiveResult = calculatePublicResult(4);`;
+    await write(extension, 'aggressive.js', source);
+
+    const result = await build({
+      cwd: root,
+      root: './extension',
+      obfuscate: { enabled: true, mode: 'aggressive' },
+      zip: false,
+    });
+    const output = await readFile(path.join(result.outDir, 'aggressive.js'), 'utf8');
+    assert.doesNotMatch(output, /calculatePublicResult|veryLongIntermediateName|dead code/);
+    assert.ok(output.length < source.length / 2);
+    const context = vm.createContext({});
+    vm.runInContext(output, context);
+    assert.equal(context.aggressiveResult, 8);
+    assert.equal(result.files.obfuscated, 1);
+  });
+});
+
+test('keeps the previous output when processing fails', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await createExtension(extension);
+    await write(extension, 'scripts/background.js', 'function broken( {');
+    await write(root, 'dist/sentinel.txt', 'keep me');
+    await assert.rejects(() => build({ cwd: root, zip: false }), /scripts\/background\.js/);
+    assert.equal(await readFile(path.join(root, 'dist/sentinel.txt'), 'utf8'), 'keep me');
+  });
+});
+
+test('rejects output directories that contain the source directory', async () => {
+  await withTemporaryDirectory(async (root) => {
+    await createExtension(path.join(root, 'extension'));
+    await assert.rejects(
+      () => build({ cwd: root, root: './extension', outDir: root, zip: false }),
+      /输出目录不能/,
+    );
+  });
+});
+
+test('runs the compiled CLI and honors negated flags', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await createExtension(extension);
+    await write(extension, 'dynamic.json', '{"included":true}');
+    let stdout = '';
+    await runCli(
+      [
+        process.execPath,
+        'eb',
+        extension,
+        '--out-dir',
+        path.join(root, 'cli-output'),
+        '--no-minify',
+        '--no-zip',
+        '--include',
+        'dynamic.json',
+      ],
+      { write: (text) => (stdout += text) },
+    );
+    assert.match(stdout, /extbuilder: 已输出到/);
+    assert.match(await readFile(path.join(root, 'cli-output', 'scripts/background.js'), 'utf8'), /removable comment/);
+    assert.equal(await readFile(path.join(root, 'cli-output', 'dynamic.json'), 'utf8'), '{"included":true}');
+    await assert.rejects(() => readFile(path.join(root, 'cli-output', 'extension-1.2.3.zip')));
+  });
+});
+
+test('enables aggressive JavaScript processing and ES5 output through CLI flags', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await write(
+      extension,
+      'manifest.json',
+      JSON.stringify({
+        manifest_version: 3,
+        name: 'CLI JavaScript Fixture',
+        version: '1.0.0',
+        background: { service_worker: 'main.js' },
+      }),
+    );
+    await write(
+      extension,
+      'main.js',
+      `const verboseTopLevelFunction = (input = 2) => {
+        const verboseLocalValue = input + 1;
+        return verboseLocalValue;
+      };
+      globalThis.cliResult = verboseTopLevelFunction();`,
+    );
+    let stdout = '';
+    await runCli(
+      [
+        process.execPath,
+        'eb',
+        extension,
+        '--out-dir',
+        path.join(root, 'cli-js-output'),
+        '--aggressive-js',
+        '--target',
+        'es5',
+        '--no-zip',
+      ],
+      { write: (text) => (stdout += text) },
+    );
+    const output = await readFile(path.join(root, 'cli-js-output', 'main.js'), 'utf8');
+    assert.doesNotMatch(output, /=>|\bconst\b|verboseTopLevelFunction|verboseLocalValue/);
+    const context = vm.createContext({});
+    vm.runInContext(output, context);
+    assert.equal(context.cliResult, 3);
+    assert.match(stdout, /混淆 1；转译 1/);
+  });
+});
+
+test('supports short and long command names with help and version flags', async () => {
+  let buildCalls = 0;
+  const buildStub = async () => {
+    buildCalls += 1;
+    throw new Error('帮助和版本参数不应启动构建');
+  };
+
+  // 短命令的帮助信息应使用 eb 作为 Usage 中的命令名，并列出常用别名。
+  let stdout = '';
+  await runCli([process.execPath, 'eb', '--help'], {
+    commandName: 'eb',
+    build: buildStub,
+    write: (text) => (stdout += text),
+  });
+  assert.match(stdout, /Usage: eb/);
+  assert.match(stdout, /-h, --help/);
+  assert.match(stdout, /-v, --version/);
+
+  // -v 是 --version 的常用短写；输出版本后应正常结束。
+  stdout = '';
+  await runCli([process.execPath, 'extbuilder', '-v'], {
+    commandName: 'extbuilder',
+    build: buildStub,
+    write: (text) => (stdout += text),
+  });
+  assert.equal(stdout.trim(), '0.1.0');
+
+  // 长命令入口共享同一套选项，但帮助文本应显示 extbuilder。
+  stdout = '';
+  await runCli([process.execPath, 'extbuilder', '--help'], {
+    commandName: 'extbuilder',
+    build: buildStub,
+    write: (text) => (stdout += text),
+  });
+  assert.match(stdout, /Usage: extbuilder/);
+  assert.equal(buildCalls, 0);
+});
+
+let failed = 0;
+// 串行执行可以避免多个构建同时占用 Windows 临时目录，并使失败输出保持确定顺序。
+for (const { name, run } of tests) {
+  try {
+    await run();
+    process.stdout.write(`✓ ${name}\n`);
+  } catch (error) {
+    failed += 1;
+    process.stderr.write(`✗ ${name}\n${error instanceof Error ? error.stack : String(error)}\n`);
+  }
+}
+
+if (failed > 0) {
+  process.stderr.write(`\n${failed}/${tests.length} tests failed\n`);
+  process.exitCode = 1;
+} else {
+  process.stdout.write(`\n${tests.length} tests passed\n`);
+}
