@@ -125,7 +125,8 @@ test('uses safe configuration defaults', async () => {
     assert.equal(resolved.obfuscate.enabled, false);
     assert.equal(resolved.obfuscate.mode, 'safe');
     assert.deepEqual(resolved.transpile, { enabled: false, target: 'modern', exclude: [] });
-    assert.equal(resolved.zip.enabled, true);
+    assert.deepEqual(resolved.transformExclude, []);
+    assert.equal(resolved.zip.enabled, false);
   });
 });
 
@@ -159,7 +160,7 @@ test('finds a nested manifest, preserves paths, minifies files, copies binary da
     const manifestBefore = await readFile(path.join(extension, 'manifest.json'));
     const binaryBefore = await readFile(path.join(extension, 'images/icon.bin'));
 
-    const result = await build({ cwd: root });
+    const result = await build({ cwd: root, zip: true });
     assert.equal(result.outDir, path.join(root, 'dist'));
     assert.equal(result.zipPath, path.join(root, 'dist', 'sample-extension-1.2.3.zip'));
     assert.deepEqual(await readFile(path.join(result.outDir, 'manifest.json')), manifestBefore);
@@ -525,6 +526,34 @@ test('runs the compiled CLI and honors negated flags', async () => {
   });
 });
 
+test('keeps ZIP disabled by default and lets zip-name enable it explicitly', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await createExtension(extension);
+
+    const defaultResult = await build({ cwd: root, root: extension });
+    assert.equal(defaultResult.zipPath, undefined);
+
+    let stdout = '';
+    await runCli(
+      [
+        process.execPath,
+        'extb',
+        extension,
+        '--manifest',
+        path.join(extension, 'manifest.json'),
+        '--out-dir',
+        path.join(root, 'zip-output'),
+        '--zip-name',
+        'custom-release.zip',
+      ],
+      { commandName: 'extb', write: (text) => (stdout += text) },
+    );
+    await readFile(path.join(root, 'zip-output', 'custom-release.zip'));
+    assert.match(stdout, /ZIP: .*custom-release\.zip/);
+  });
+});
+
 test('enables aggressive JavaScript processing and ES5 output through CLI flags', async () => {
   await withTemporaryDirectory(async (root) => {
     const extension = path.join(root, 'extension');
@@ -571,6 +600,72 @@ test('enables aggressive JavaScript processing and ES5 output through CLI flags'
   });
 });
 
+test('supports no-config, no-transform, keep-name, and JSON CLI output', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await createExtension(extension);
+    const originalPopup = await readFile(path.join(extension, 'popup.html'), 'utf8');
+    // 无效配置用于证明 --no-config 确实跳过了自动发现，而不是碰巧加载成功。
+    await write(extension, 'extb.config.json', '{ invalid json');
+
+    let stdout = '';
+    await runCli(
+      [
+        process.execPath,
+        'extb',
+        extension,
+        '--no-config',
+        '--obfuscate',
+        '--keep-name',
+        'localLongName',
+        '--no-transform',
+        'popup.html',
+        '--no-zip',
+        '--json',
+      ],
+      { commandName: 'extb', write: (text) => (stdout += text) },
+    );
+
+    const result = JSON.parse(stdout);
+    assert.equal(result.outDir, path.join(extension, 'dist'));
+    assert.equal(result.zipPath, undefined);
+    assert.equal(result.files.obfuscated, 1);
+    assert.equal(await readFile(path.join(result.outDir, 'popup.html'), 'utf8'), originalPopup);
+    assert.match(await readFile(path.join(result.outDir, 'scripts/background.js'), 'utf8'), /localLongName/);
+    assert.doesNotMatch(stdout, /extb: 已输出到/);
+  });
+});
+
+test('rejects contradictory CLI flags before starting a build', async () => {
+  let buildCalls = 0;
+  const buildStub = async () => {
+    buildCalls += 1;
+    throw new Error('冲突参数不应启动构建');
+  };
+  const conflicts = [
+    ['--config', 'extb.config.ts', '--no-config'],
+    ['--aggressive-js', '--no-obfuscate'],
+    ['--aggressive-js', '--no-minify-js'],
+    ['--zip-name', 'release.zip', '--no-zip'],
+  ];
+  for (const flags of conflicts) {
+    await assert.rejects(
+      () => runCli([process.execPath, 'extb', ...flags], { commandName: 'extb', build: buildStub }),
+      /不能同时使用/,
+    );
+  }
+  assert.equal(buildCalls, 0);
+});
+
+test('suppresses Commander duplicate error output', async () => {
+  let stdout = '';
+  await assert.rejects(
+    () => runCli([process.execPath, 'extb', '--target', 'invalid'], { write: (text) => (stdout += text) }),
+    /只能是 'modern' 或 'es5'/,
+  );
+  assert.equal(stdout, '');
+});
+
 test('supports short and long command names with help and version flags', async () => {
   let buildCalls = 0;
   const buildStub = async () => {
@@ -588,6 +683,15 @@ test('supports short and long command names with help and version flags', async 
   assert.match(stdout, /Usage: eb/);
   assert.match(stdout, /-h, --help/);
   assert.match(stdout, /-v, --version/);
+  assert.match(stdout, /输入选项：/);
+  assert.match(stdout, /--no-config/);
+  assert.match(stdout, /--no-transform <glob>/);
+  assert.match(stdout, /--keep-name <name>/);
+  assert.match(stdout, /--json/);
+  assert.doesNotMatch(stdout, /--transpile/);
+  assert.match(stdout, /生成 ZIP（默认：关闭）/);
+  assert.match(stdout, /默认：modern/);
+  assert.match(stdout, /默认：可读文本/);
 
   // -v 是 --version 的常用短写；输出版本后应正常结束。
   stdout = '';
@@ -596,7 +700,8 @@ test('supports short and long command names with help and version flags', async 
     build: buildStub,
     write: (text) => (stdout += text),
   });
-  assert.equal(stdout.trim(), '0.1.0');
+  const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(stdout.trim(), packageJson.version);
 
   // 长命令入口共享同一套选项，但帮助文本应显示 extb。
   stdout = '';

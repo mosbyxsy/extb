@@ -214,7 +214,12 @@ function applyObfuscate(
     reservedNames:
       input.reservedNames === undefined
         ? current.reservedNames
-        : stringArray(input.reservedNames, 'obfuscate.reservedNames'),
+        : [
+            ...new Set([
+              ...current.reservedNames,
+              ...stringArray(input.reservedNames, 'obfuscate.reservedNames'),
+            ]),
+          ],
   };
 }
 
@@ -284,6 +289,11 @@ function mergeConfig(
     ...stringArray(fileConfig.include, 'include'),
     ...stringArray(overrides.include, 'include'),
   ];
+  // transformExclude 与顶层 include/exclude 一样采用累加语义，适合 CLI 临时追加 vendor 文件。
+  const transformExclude = [
+    ...stringArray(fileConfig.transformExclude, 'transformExclude'),
+    ...stringArray(overrides.transformExclude, 'transformExclude'),
+  ];
 
   // 压缩默认全部开启。每应用一层，都保留该层没有声明的旧值。
   let minify: ResolvedMinifyOptions = { enabled: true, html: true, js: true, css: true, exclude: [] };
@@ -300,12 +310,28 @@ function mergeConfig(
   transpile = applyTranspile(transpile, fileConfig.transpile);
   transpile = applyTranspile(transpile, overrides.transpile);
 
-  // ZIP 默认开启，与可直接加载的目录同时交付。
-  let zip: ResolvedZipOptions = { enabled: true };
+  // 通用转换排除规则最终注入三个处理器；资源仍进入包，只是保持原始文本内容。
+  minify.exclude = [...new Set([...minify.exclude, ...transformExclude])];
+  obfuscate.exclude = [...new Set([...obfuscate.exclude, ...transformExclude])];
+  transpile.exclude = [...new Set([...transpile.exclude, ...transformExclude])];
+
+  // ZIP 默认关闭；普通构建只输出可直接加载的目录，需要归档时再显式启用。
+  let zip: ResolvedZipOptions = { enabled: false };
   zip = applyZip(zip, fileConfig.zip);
   zip = applyZip(zip, overrides.zip);
 
-  const resolved: ResolvedConfig = { cwd, root, outDir, exclude, include, minify, obfuscate, transpile, zip };
+  const resolved: ResolvedConfig = {
+    cwd,
+    root,
+    outDir,
+    exclude,
+    include,
+    transformExclude,
+    minify,
+    obfuscate,
+    transpile,
+    zip,
+  };
   if (manifest !== undefined) resolved.manifest = manifest;
   if (configFile !== undefined) resolved.configFile = configFile;
   return resolved;

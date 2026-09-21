@@ -64,6 +64,8 @@ export interface ExtbConfig {
   exclude?: string[];
   /** 静态分析无法发现时，强制加入包并继续追踪其依赖的相对路径 glob。 */
   include?: string[];
+  /** 文件仍会打包，但跳过 HTML/CSS/JS 压缩、混淆和语法转译。 */
+  transformExclude?: string[];
   /** 布尔值是总开关，对象形式可分别控制三类文件。 */
   minify?: boolean | MinifyOptions;
   /** 布尔值是总开关，对象形式可设置排除项和保留名称。 */
@@ -136,6 +138,8 @@ export interface ResolvedConfig {
   exclude: string[];
   /** 已合并的动态资源补充规则。 */
   include: string[];
+  /** 已合并的“只复制、不转换”规则。 */
+  transformExclude: string[];
   minify: ResolvedMinifyOptions;
   obfuscate: ResolvedObfuscateOptions;
   transpile: ResolvedTranspileOptions;
