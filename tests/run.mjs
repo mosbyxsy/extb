@@ -17,7 +17,7 @@ function test(name, run) {
 
 async function withTemporaryDirectory(run) {
   // 每个场景使用独立临时目录，并在成功或失败后统一清理，防止测试相互污染。
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'extbuilder-test-'));
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'extb-test-'));
   try {
     return await run(directory);
   } finally {
@@ -131,9 +131,9 @@ test('uses safe configuration defaults', async () => {
 
 test('rejects ambiguous automatic config discovery', async () => {
   await withTemporaryDirectory(async (root) => {
-    await writeFile(path.join(root, 'extbuilder.config.json'), '{}');
-    await writeFile(path.join(root, 'extbuilder.config.mjs'), 'export default {};');
-    await assert.rejects(() => loadConfig({ cwd: root }), /多个 extbuilder 配置文件/);
+    await writeFile(path.join(root, 'extb.config.json'), '{}');
+    await writeFile(path.join(root, 'extb.config.mjs'), 'export default {};');
+    await assert.rejects(() => loadConfig({ cwd: root }), /多个 extb 配置文件/);
   });
 });
 
@@ -187,6 +187,39 @@ test('finds a nested manifest, preserves paths, minifies files, copies binary da
     assert.ok(entries.every((entry) => !entry.endsWith('.zip')));
     assert.deepEqual(result.files, { copied: 2, html: 1, js: 1, css: 1, obfuscated: 0, transpiled: 0 });
     assert.ok(result.bytesAfter < result.bytesBefore);
+  });
+});
+
+test('ignores the default output directory when discovering a manifest on repeated builds', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await createExtension(extension);
+
+    const first = await build({ cwd: root, zip: false });
+    assert.equal(first.manifestPath, path.join(extension, 'manifest.json'));
+    // 第一次构建已经在 root/dist 中生成了第二份 manifest；再次构建仍必须选中源码。
+    const second = await build({ cwd: root, zip: false });
+    assert.equal(second.manifestPath, path.join(extension, 'manifest.json'));
+    assert.equal(second.outDir, path.join(root, 'dist'));
+  });
+});
+
+test('ignores a custom output directory and stale temporary output during manifest discovery', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    const customOutput = path.join(root, 'artifacts', 'browser-package');
+    await createExtension(extension);
+    // 模拟上一次自定义输出和异常中断留下的备份，两者都包含合法 manifest。
+    await createExtension(customOutput);
+    await createExtension(path.join(root, '.browser-package.extb-backup-stale'));
+
+    const result = await build({
+      cwd: root,
+      outDir: customOutput,
+      zip: false,
+    });
+    assert.equal(result.manifestPath, path.join(extension, 'manifest.json'));
+    assert.equal(result.outDir, customOutput);
   });
 });
 
@@ -317,7 +350,7 @@ test('loads TypeScript config and applies programmatic overrides', async () => {
     await createExtension(path.join(root, 'extension'));
     await write(
       root,
-      'extbuilder.config.ts',
+      'extb.config.ts',
       `export default {
         root: './extension',
         outDir: './from-config',
@@ -485,7 +518,7 @@ test('runs the compiled CLI and honors negated flags', async () => {
       ],
       { write: (text) => (stdout += text) },
     );
-    assert.match(stdout, /extbuilder: 已输出到/);
+    assert.match(stdout, /extb: 已输出到/);
     assert.match(await readFile(path.join(root, 'cli-output', 'scripts/background.js'), 'utf8'), /removable comment/);
     assert.equal(await readFile(path.join(root, 'cli-output', 'dynamic.json'), 'utf8'), '{"included":true}');
     await assert.rejects(() => readFile(path.join(root, 'cli-output', 'extension-1.2.3.zip')));
@@ -558,21 +591,21 @@ test('supports short and long command names with help and version flags', async 
 
   // -v 是 --version 的常用短写；输出版本后应正常结束。
   stdout = '';
-  await runCli([process.execPath, 'extbuilder', '-v'], {
-    commandName: 'extbuilder',
+  await runCli([process.execPath, 'extb', '-v'], {
+    commandName: 'extb',
     build: buildStub,
     write: (text) => (stdout += text),
   });
   assert.equal(stdout.trim(), '0.1.0');
 
-  // 长命令入口共享同一套选项，但帮助文本应显示 extbuilder。
+  // 长命令入口共享同一套选项，但帮助文本应显示 extb。
   stdout = '';
-  await runCli([process.execPath, 'extbuilder', '--help'], {
-    commandName: 'extbuilder',
+  await runCli([process.execPath, 'extb', '--help'], {
+    commandName: 'extb',
     build: buildStub,
     write: (text) => (stdout += text),
   });
-  assert.match(stdout, /Usage: extbuilder/);
+  assert.match(stdout, /Usage: extb/);
   assert.equal(buildCalls, 0);
 });
 

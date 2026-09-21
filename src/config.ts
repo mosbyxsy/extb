@@ -1,9 +1,9 @@
 import { access, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createJiti } from 'jiti';
-import { ExtBuilderError, asErrorMessage } from './errors.js';
+import { ExtbError, asErrorMessage } from './errors.js';
 import type {
-  ExtBuilderConfig,
+  ExtbConfig,
   LoadConfigOptions,
   MinifyOptions,
   ObfuscateOptions,
@@ -18,24 +18,20 @@ import type {
 
 /** 自动发现时允许的配置文件名。禁止同时存在多个候选，避免隐式优先级造成误构建。 */
 export const CONFIG_FILE_NAMES = [
-  'extbuilder.config.ts',
-  '**/extbuilder.config.ts',
-  'extbuilder.config.mts',
-  '**/extbuilder.config.mts',
-  'extbuilder.config.cts',
-  '**/extbuilder.config.cts',
-  'extbuilder.config.js',
-  '**/extbuilder.config.js',
-  'extbuilder.config.mjs',
-  '**/extbuilder.config.mjs',
-  'extbuilder.config.cjs',
-  '**/extbuilder.config.cjs',
-  'extbuilder.config.json',
-  '**/extbuilder.config.json',
-  '.*.extbuilder-tmp-*',
-  '.*.extbuilder-tmp-*/**',
-  '.*.extbuilder-backup-*',
-  '.*.extbuilder-backup-*/**',
+  'extb.config.ts',
+  '**/extb.config.ts',
+  'extb.config.mts',
+  '**/extb.config.mts',
+  'extb.config.cts',
+  '**/extb.config.cts',
+  'extb.config.js',
+  '**/extb.config.js',
+  'extb.config.mjs',
+  '**/extb.config.mjs',
+  'extb.config.cjs',
+  '**/extb.config.cjs',
+  'extb.config.json',
+  '**/extb.config.json',
 ] as const;
 
 /**
@@ -53,26 +49,31 @@ export const DEFAULT_EXCLUDES = [
   '.svn/**',
   'node_modules',
   'node_modules/**',
-  'extbuilder.config.ts',
-  'extbuilder.config.mts',
-  'extbuilder.config.cts',
-  'extbuilder.config.js',
-  'extbuilder.config.mjs',
-  'extbuilder.config.cjs',
-  'extbuilder.config.json',
+  'extb.config.ts',
+  'extb.config.mts',
+  'extb.config.cts',
+  'extb.config.js',
+  'extb.config.mjs',
+  'extb.config.cjs',
+  'extb.config.json',
   '.DS_Store',
   '**/.DS_Store',
   'Thumbs.db',
   '**/Thumbs.db',
   '*.log',
   '**/*.log',
+  // 构建被强制中断时可能留下同级临时/备份目录，后续 manifest 扫描也必须忽略它们。
+  '.*.extb-tmp-*',
+  '.*.extb-tmp-*/**',
+  '.*.extb-backup-*',
+  '.*.extb-backup-*/**',
 ] as const;
 
 /**
  * 纯类型辅助函数。运行时原样返回对象，使 TS 配置文件获得自动补全和类型检查，
  * 不在此阶段解析路径或写入任何默认值。
  */
-export function defineConfig(config: ExtBuilderConfig): ExtBuilderConfig {
+export function defineConfig(config: ExtbConfig): ExtbConfig {
   return config;
 }
 
@@ -105,13 +106,13 @@ async function discoverConfig(root: string): Promise<string | undefined> {
   try {
     names = new Set(await readdir(root));
   } catch (error) {
-    throw new ExtBuilderError(`无法读取根目录 ${root}: ${asErrorMessage(error)}`, { cause: error });
+    throw new ExtbError(`无法读取根目录 ${root}: ${asErrorMessage(error)}`, { cause: error });
   }
 
   const candidates = CONFIG_FILE_NAMES.filter((name) => names.has(name)).map((name) => path.join(root, name));
   if (candidates.length > 1) {
-    throw new ExtBuilderError(
-      `发现多个 extbuilder 配置文件，请使用 --config 明确指定：\n${candidates.map((file) => `  - ${file}`).join('\n')}`,
+    throw new ExtbError(
+      `发现多个 extb 配置文件，请使用 --config 明确指定：\n${candidates.map((file) => `  - ${file}`).join('\n')}`,
     );
   }
   return candidates[0];
@@ -121,7 +122,7 @@ async function discoverConfig(root: string): Promise<string | undefined> {
  * 加载 JSON 或可执行的 TS/JS 配置。
  * JSON 使用原生解析器；其余格式通过 jiti 兼容 ESM、CJS 和 TypeScript 默认导出。
  */
-async function readConfigFile(filePath: string): Promise<ExtBuilderConfig> {
+async function readConfigFile(filePath: string): Promise<ExtbConfig> {
   let value: unknown;
   try {
     if (path.extname(filePath).toLowerCase() === '.json') {
@@ -131,13 +132,13 @@ async function readConfigFile(filePath: string): Promise<ExtBuilderConfig> {
       value = await jiti.import(filePath, { default: true });
     }
   } catch (error) {
-    throw new ExtBuilderError(`加载配置文件 ${filePath} 失败: ${asErrorMessage(error)}`, { cause: error });
+    throw new ExtbError(`加载配置文件 ${filePath} 失败: ${asErrorMessage(error)}`, { cause: error });
   }
 
   if (!isPlainObject(value)) {
-    throw new ExtBuilderError(`配置文件 ${filePath} 必须导出一个对象。`);
+    throw new ExtbError(`配置文件 ${filePath} 必须导出一个对象。`);
   }
-  return value as ExtBuilderConfig;
+  return value as ExtbConfig;
 }
 
 /** 将相对路径按明确的基准目录转换为绝对路径。 */
@@ -149,8 +150,8 @@ function resolvePath(value: string, baseDir: string): string {
  * 只解析配置中的路径字段，其他字段保持不变。
  * 配置文件字段以配置文件目录为基准，CLI/编程参数则会以 cwd 为基准调用本函数。
  */
-function resolveConfigPaths(config: ExtBuilderConfig, baseDir: string): ExtBuilderConfig {
-  const resolved: ExtBuilderConfig = { ...config };
+function resolveConfigPaths(config: ExtbConfig, baseDir: string): ExtbConfig {
+  const resolved: ExtbConfig = { ...config };
   if (config.root !== undefined) resolved.root = resolvePath(config.root, baseDir);
   if (config.manifest !== undefined) resolved.manifest = resolvePath(config.manifest, baseDir);
   if (config.outDir !== undefined) resolved.outDir = resolvePath(config.outDir, baseDir);
@@ -161,7 +162,7 @@ function resolveConfigPaths(config: ExtBuilderConfig, baseDir: string): ExtBuild
 function stringArray(value: unknown, label: string): string[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
-    throw new ExtBuilderError(`${label} 必须是字符串数组。`);
+    throw new ExtbError(`${label} 必须是字符串数组。`);
   }
   return [...value];
 }
@@ -177,7 +178,7 @@ function applyMinify(current: ResolvedMinifyOptions, input: boolean | MinifyOpti
   if (typeof input === 'boolean') {
     return { ...current, enabled: input, html: input, js: input, css: input };
   }
-  if (!isPlainObject(input)) throw new ExtBuilderError('minify 必须是布尔值或对象。');
+  if (!isPlainObject(input)) throw new ExtbError('minify 必须是布尔值或对象。');
 
   let html = current.html;
   let js = current.js;
@@ -202,9 +203,9 @@ function applyObfuscate(
 ): ResolvedObfuscateOptions {
   if (input === undefined) return current;
   if (typeof input === 'boolean') return { ...current, enabled: input };
-  if (!isPlainObject(input)) throw new ExtBuilderError('obfuscate 必须是布尔值或对象。');
+  if (!isPlainObject(input)) throw new ExtbError('obfuscate 必须是布尔值或对象。');
   if (input.mode !== undefined && input.mode !== 'safe' && input.mode !== 'aggressive') {
-    throw new ExtBuilderError("obfuscate.mode 只能是 'safe' 或 'aggressive'。");
+    throw new ExtbError("obfuscate.mode 只能是 'safe' 或 'aggressive'。");
   }
   return {
     enabled: input.enabled === undefined ? current.enabled : Boolean(input.enabled),
@@ -226,9 +227,9 @@ function applyTranspile(
   if (typeof input === 'boolean') {
     return { ...current, enabled: input, target: input ? 'es5' : current.target };
   }
-  if (!isPlainObject(input)) throw new ExtBuilderError('transpile 必须是布尔值或对象。');
+  if (!isPlainObject(input)) throw new ExtbError('transpile 必须是布尔值或对象。');
   if (input.target !== undefined && input.target !== 'modern' && input.target !== 'es5') {
-    throw new ExtBuilderError("transpile.target 只能是 'modern' 或 'es5'。");
+    throw new ExtbError("transpile.target 只能是 'modern' 或 'es5'。");
   }
   const target = input.target ?? current.target;
   const enabled = input.enabled === undefined ? (input.target === undefined ? current.enabled : target === 'es5') : Boolean(input.enabled);
@@ -243,14 +244,14 @@ function applyTranspile(
 function applyZip(current: ResolvedZipOptions, input: boolean | ZipOptions | undefined): ResolvedZipOptions {
   if (input === undefined) return current;
   if (typeof input === 'boolean') return { ...current, enabled: input };
-  if (!isPlainObject(input)) throw new ExtBuilderError('zip 必须是布尔值或对象。');
+  if (!isPlainObject(input)) throw new ExtbError('zip 必须是布尔值或对象。');
   const next: ResolvedZipOptions = {
     ...current,
     enabled: input.enabled === undefined ? current.enabled : Boolean(input.enabled),
   };
   if (input.fileName !== undefined) {
     if (typeof input.fileName !== 'string' || input.fileName.trim() === '') {
-      throw new ExtBuilderError('zip.fileName 必须是非空字符串。');
+      throw new ExtbError('zip.fileName 必须是非空字符串。');
     }
     next.fileName = input.fileName;
   }
@@ -266,8 +267,8 @@ function applyZip(current: ResolvedZipOptions, input: boolean | ZipOptions | und
 function mergeConfig(
   cwd: string,
   discoveryRoot: string,
-  fileConfig: ExtBuilderConfig,
-  overrides: ExtBuilderConfig,
+  fileConfig: ExtbConfig,
+  overrides: ExtbConfig,
   configFile?: string,
 ): ResolvedConfig {
   const root = overrides.root ?? fileConfig.root ?? discoveryRoot;
@@ -311,7 +312,7 @@ function mergeConfig(
 }
 
 /**
- * 发现、加载并归一化 extbuilder 配置。
+ * 发现、加载并归一化 extb 配置。
  *
  * 路径解析顺序非常重要：先确定调用方 cwd 和用于发现配置的 root；配置文件加载后，
  * 其路径相对配置文件目录解析；最后把调用方覆盖值相对 cwd 解析并合并。
@@ -329,9 +330,9 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Resol
         : await discoverConfig(discoveryRoot);
   }
 
-  let fileConfig: ExtBuilderConfig = {};
+  let fileConfig: ExtbConfig = {};
   if (configFile !== undefined) {
-    if (!(await pathExists(configFile))) throw new ExtBuilderError(`配置文件不存在: ${configFile}`);
+    if (!(await pathExists(configFile))) throw new ExtbError(`配置文件不存在: ${configFile}`);
     fileConfig = resolveConfigPaths(await readConfigFile(configFile), path.dirname(configFile));
   }
 

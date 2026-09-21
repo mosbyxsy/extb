@@ -49,11 +49,11 @@ export interface ZipOptions {
 }
 
 /**
- * 用户可写入 extbuilder.config.* 的原始配置结构。
+ * 用户可写入 extb.config.* 的原始配置结构。
  *
  * 此处的路径仍是用户输入形式；只有经过 loadConfig() 后才会转换成绝对路径。
  */
-export interface ExtBuilderConfig {
+export interface ExtbConfig {
   /** 搜索 manifest.json 的根目录。 */
   root?: string;
   /** 显式指定 manifest.json；省略时从 root 递归查找。 */
@@ -75,7 +75,7 @@ export interface ExtBuilderConfig {
 }
 
 /** build() 接受的参数；这些参数拥有最高优先级。 */
-export interface BuildOptions extends ExtBuilderConfig {
+export interface BuildOptions extends ExtbConfig {
   /** Base directory for programmatic path resolution. Defaults to process.cwd(). */
   cwd?: string;
   /** Explicit config path, false to disable loading, or undefined to auto-discover. */
@@ -91,7 +91,7 @@ export interface LoadConfigOptions {
   /** 指定配置文件；false 表示完全禁用配置文件加载。 */
   configFile?: string | false;
   /** 在配置文件之上应用的调用方覆盖值。 */
-  overrides?: ExtBuilderConfig;
+  overrides?: ExtbConfig;
 }
 
 /** 归一化后的压缩配置，所有开关和数组都已经补全。 */

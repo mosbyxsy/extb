@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createZip } from './archive.js';
 import { loadConfig } from './config.js';
 import { collectRequiredSourceFiles } from './dependencies.js';
-import { ExtBuilderError, asErrorMessage } from './errors.js';
+import { ExtbError, asErrorMessage } from './errors.js';
 import { collectSourceFiles, findManifests, isPathInside, toPosixPath } from './paths.js';
 import { processTextFile } from './processors.js';
 import type { BuildOptions, BuildResult } from './types.js';
@@ -22,21 +22,21 @@ const TEXT_EXTENSIONS = new Set(['.html', '.htm', '.js', '.mjs', '.cjs', '.css']
 
 /**
  * 对 manifest 做最小但必要的运行时校验，并把 unknown 收窄为 ExtensionManifest。
- * 浏览器专属字段由对应浏览器在加载/提交时验证，extbuilder 不擅自删除未知字段。
+ * 浏览器专属字段由对应浏览器在加载/提交时验证，extb 不擅自删除未知字段。
  */
 function assertManifest(value: unknown, manifestPath: string): asserts value is ExtensionManifest {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new ExtBuilderError(`manifest 不是 JSON 对象: ${manifestPath}`);
+    throw new ExtbError(`manifest 不是 JSON 对象: ${manifestPath}`);
   }
   const candidate = value as Record<string, unknown>;
   if (!Number.isInteger(candidate.manifest_version)) {
-    throw new ExtBuilderError(`manifest.manifest_version 必须是整数: ${manifestPath}`);
+    throw new ExtbError(`manifest.manifest_version 必须是整数: ${manifestPath}`);
   }
   if (typeof candidate.name !== 'string' || candidate.name.trim() === '') {
-    throw new ExtBuilderError(`manifest.name 必须是非空字符串: ${manifestPath}`);
+    throw new ExtbError(`manifest.name 必须是非空字符串: ${manifestPath}`);
   }
   if (typeof candidate.version !== 'string' || candidate.version.trim() === '') {
-    throw new ExtBuilderError(`manifest.version 必须是非空字符串: ${manifestPath}`);
+    throw new ExtbError(`manifest.version 必须是非空字符串: ${manifestPath}`);
   }
 }
 
@@ -57,7 +57,7 @@ function sanitizeFilePart(value: string): string {
 /** 自定义 ZIP 只允许平面文件名，阻止 `../` 或绝对路径把归档写到输出目录之外。 */
 function validateZipName(fileName: string): string {
   if (path.basename(fileName) !== fileName || !fileName.toLowerCase().endsWith('.zip')) {
-    throw new ExtBuilderError('zip.fileName 必须是以 .zip 结尾且不包含目录的文件名。');
+    throw new ExtbError('zip.fileName 必须是以 .zip 结尾且不包含目录的文件名。');
   }
   return fileName;
 }
@@ -76,10 +76,10 @@ async function resolveManifest(root: string, explicitManifest: string | undefine
       const info = await stat(manifestPath);
       if (!info.isFile()) throw new Error('不是文件');
     } catch (error) {
-      throw new ExtBuilderError(`manifest 文件不存在或不可读: ${explicitManifest}`, { cause: error });
+      throw new ExtbError(`manifest 文件不存在或不可读: ${explicitManifest}`, { cause: error });
     }
     if (path.basename(manifestPath).toLowerCase() !== 'manifest.json') {
-      throw new ExtBuilderError(`manifest 文件名必须是 manifest.json: ${manifestPath}`);
+      throw new ExtbError(`manifest 文件名必须是 manifest.json: ${manifestPath}`);
     }
     return manifestPath;
   }
@@ -88,16 +88,31 @@ async function resolveManifest(root: string, explicitManifest: string | undefine
   try {
     manifests = await findManifests(root, excludes);
   } catch (error) {
-    if (error instanceof ExtBuilderError) throw error;
-    throw new ExtBuilderError(`查找 manifest.json 失败: ${asErrorMessage(error)}`, { cause: error });
+    if (error instanceof ExtbError) throw error;
+    throw new ExtbError(`查找 manifest.json 失败: ${asErrorMessage(error)}`, { cause: error });
   }
-  if (manifests.length === 0) throw new ExtBuilderError(`在 ${root} 中未找到 manifest.json。`);
+  if (manifests.length === 0) throw new ExtbError(`在 ${root} 中未找到 manifest.json。`);
   if (manifests.length > 1) {
-    throw new ExtBuilderError(
+    throw new ExtbError(
       `发现多个 manifest.json，请使用 --manifest 明确指定：\n${manifests.map((file) => `  - ${file}`).join('\n')}`,
     );
   }
   return manifests[0]!;
+}
+
+/**
+ * 当目标目录位于扫描根目录内部时，把它转换成相对 root 的 glob 并加入排除列表。
+ *
+ * manifest 自动发现发生在源码根目录确定之前，因此不能复用后续相对 sourceDir 的排除项；
+ * 这里专门按搜索 root 计算一次，确保默认 dist 和任意自定义输出目录中的旧 manifest
+ * 都不会被误认为另一个扩展。输出等于 root 或位于 root 外部时不生成无意义规则。
+ */
+function excludeNestedDirectory(root: string, directory: string, excludes: readonly string[]): string[] {
+  const next = [...excludes];
+  if (!isPathInside(path.resolve(root), path.resolve(directory))) return next;
+  const relativeDirectory = toPosixPath(path.relative(root, directory));
+  next.push(relativeDirectory, `${relativeDirectory}/**`);
+  return next;
 }
 
 /**
@@ -106,7 +121,7 @@ async function resolveManifest(root: string, explicitManifest: string | undefine
  */
 function validateOutputPath(sourceDir: string, outDir: string): void {
   if (sourceDir === outDir || isPathInside(outDir, sourceDir)) {
-    throw new ExtBuilderError(`输出目录不能等于源码目录或包含源码目录: ${outDir}`);
+    throw new ExtbError(`输出目录不能等于源码目录或包含源码目录: ${outDir}`);
   }
 }
 
@@ -134,20 +149,20 @@ async function replaceDirectory(stageDir: string, outDir: string, backupDir: str
       try {
         await rename(backupDir, outDir);
       } catch (restoreError) {
-        throw new ExtBuilderError(
+        throw new ExtbError(
           `替换输出目录失败，且无法恢复旧输出。备份保留在 ${backupDir}: ${asErrorMessage(restoreError)}`,
           { cause: error },
         );
       }
     }
-    throw new ExtBuilderError(`替换输出目录失败: ${asErrorMessage(error)}`, { cause: error });
+    throw new ExtbError(`替换输出目录失败: ${asErrorMessage(error)}`, { cause: error });
   }
 
   if (backedUp) {
     try {
       await rm(backupDir, { recursive: true, force: true });
     } catch (error) {
-      throw new ExtBuilderError(`新输出已生成，但无法清理旧输出备份 ${backupDir}: ${asErrorMessage(error)}`, {
+      throw new ExtbError(`新输出已生成，但无法清理旧输出备份 ${backupDir}: ${asErrorMessage(error)}`, {
         cause: error,
       });
     }
@@ -159,7 +174,7 @@ async function replaceDirectory(stageDir: string, outDir: string, backupDir: str
  * 在 replaceDirectory 成功之前，所有写操作都只发生在唯一的临时目录中。
  */
 export async function build(options: BuildOptions = {}): Promise<BuildResult> {
-  // cwd/configFile 是加载上下文，不属于写入配置文件的 ExtBuilderConfig，需单独拆出。
+  // cwd/configFile 是加载上下文，不属于写入配置文件的 ExtbConfig，需单独拆出。
   const { cwd, configFile, ...overrides } = options;
   const config = await loadConfig({
     ...(cwd === undefined ? {} : { cwd }),
@@ -167,17 +182,19 @@ export async function build(options: BuildOptions = {}): Promise<BuildResult> {
     overrides,
   });
 
-  // manifest 的父目录才是扩展根；调用时的 root 只是自动搜索的边界。
-  const manifestPath = await resolveManifest(config.root, config.manifest, config.exclude);
-  const sourceDir = path.dirname(manifestPath);
   const outDir = path.resolve(config.outDir);
+  // manifest 的父目录才是扩展根；调用时的 root 只是自动搜索的边界。扫描前必须先排除
+  // 已知输出目录，否则第二次构建会同时找到源码和上一次 dist 中的 manifest.json。
+  const manifestExcludes = excludeNestedDirectory(config.root, outDir, config.exclude);
+  const manifestPath = await resolveManifest(config.root, config.manifest, manifestExcludes);
+  const sourceDir = path.dirname(manifestPath);
   validateOutputPath(sourceDir, outDir);
 
   let manifest: unknown;
   try {
     manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as unknown;
   } catch (error) {
-    throw new ExtBuilderError(`读取 manifest 失败 ${manifestPath}: ${asErrorMessage(error)}`, { cause: error });
+    throw new ExtbError(`读取 manifest 失败 ${manifestPath}: ${asErrorMessage(error)}`, { cause: error });
   }
   assertManifest(manifest, manifestPath);
 
@@ -201,8 +218,8 @@ export async function build(options: BuildOptions = {}): Promise<BuildResult> {
   const parentDir = path.dirname(outDir);
   const outName = path.basename(outDir);
   const token = randomUUID();
-  const stageDir = path.join(parentDir, `.${outName}.extbuilder-tmp-${token}`);
-  const backupDir = path.join(parentDir, `.${outName}.extbuilder-backup-${token}`);
+  const stageDir = path.join(parentDir, `.${outName}.extb-tmp-${token}`);
+  const backupDir = path.join(parentDir, `.${outName}.extb-backup-${token}`);
   await mkdir(parentDir, { recursive: true });
   await mkdir(stageDir, { recursive: false });
 
@@ -236,7 +253,7 @@ export async function build(options: BuildOptions = {}): Promise<BuildResult> {
         if (processed.obfuscated) counts.obfuscated += 1;
         if (processed.transpiled) counts.transpiled += 1;
       } catch (error) {
-        throw new ExtBuilderError(`处理 ${file.relativePath} 失败: ${asErrorMessage(error)}`, { cause: error });
+        throw new ExtbError(`处理 ${file.relativePath} 失败: ${asErrorMessage(error)}`, { cause: error });
       }
     }
 

@@ -1,7 +1,7 @@
 import { lstat, opendir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { minimatch } from 'minimatch';
-import { ExtBuilderError, asErrorMessage } from './errors.js';
+import { ExtbError, asErrorMessage } from './errors.js';
 
 /**
  * 一个待打包文件的物理位置与包内逻辑位置。
@@ -61,7 +61,7 @@ async function collectDirectory(
   try {
     directory = await opendir(physicalDirectory);
   } catch (error) {
-    throw new ExtBuilderError(`无法读取目录 ${physicalDirectory}: ${asErrorMessage(error)}`, { cause: error });
+    throw new ExtbError(`无法读取目录 ${physicalDirectory}: ${asErrorMessage(error)}`, { cause: error });
   }
 
   const entries = [];
@@ -79,13 +79,13 @@ async function collectDirectory(
       // 不允许链接逃逸源码根目录，否则一次构建可能无意中打包密钥或用户文件。
       const target = await realpath(physicalPath);
       if (target !== sourceRealPath && !isPathInside(sourceRealPath, target)) {
-        throw new ExtBuilderError(`符号链接指向源码目录之外: ${path.join(sourceRealPath, logicalPath)} -> ${target}`);
+        throw new ExtbError(`符号链接指向源码目录之外: ${path.join(sourceRealPath, logicalPath)} -> ${target}`);
       }
       const targetStat = await stat(target);
       if (isExcluded(relativePath, excludes, targetStat.isDirectory())) continue;
       if (targetStat.isDirectory()) {
         // ancestors 存储当前递归链上的真实路径，只阻止循环，不阻止合法地从不同位置复用目录。
-        if (ancestors.has(target)) throw new ExtBuilderError(`检测到循环符号链接: ${path.join(sourceRealPath, logicalPath)}`);
+        if (ancestors.has(target)) throw new ExtbError(`检测到循环符号链接: ${path.join(sourceRealPath, logicalPath)}`);
         const nextAncestors = new Set(ancestors);
         nextAncestors.add(target);
         await collectDirectory(target, logicalPath, sourceRealPath, excludes, nextAncestors, output);
@@ -98,7 +98,7 @@ async function collectDirectory(
     if (entryLstat.isDirectory()) {
       if (isExcluded(relativePath, excludes, true)) continue;
       const target = await realpath(physicalPath);
-      if (ancestors.has(target)) throw new ExtBuilderError(`检测到循环目录: ${physicalPath}`);
+      if (ancestors.has(target)) throw new ExtbError(`检测到循环目录: ${physicalPath}`);
       const nextAncestors = new Set(ancestors);
       nextAncestors.add(target);
       await collectDirectory(physicalPath, logicalPath, sourceRealPath, excludes, nextAncestors, output);

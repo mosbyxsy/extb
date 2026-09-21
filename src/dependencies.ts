@@ -4,7 +4,7 @@ import * as acorn from 'acorn';
 import * as walk from 'acorn-walk';
 import { Parser } from 'htmlparser2';
 import { minimatch } from 'minimatch';
-import { ExtBuilderError, asErrorMessage } from './errors.js';
+import { ExtbError, asErrorMessage } from './errors.js';
 import type { SourceFile } from './paths.js';
 
 interface DependencyReference {
@@ -24,7 +24,7 @@ interface DependencyCollectionOptions {
   include: readonly string[];
 }
 
-const EXTENSION_ORIGIN = 'https://extbuilder.invalid';
+const EXTENSION_ORIGIN = 'https://extb.invalid';
 const HTML_REFERENCE_ATTRIBUTES = new Set(['src', 'href', 'poster', 'data', 'action', 'formaction']);
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -91,7 +91,7 @@ function parseJavaScript(source: string, relativePath: string): acorn.Node {
     try {
       return acorn.parse(source, { ...options, sourceType: 'script' });
     } catch (scriptError) {
-      throw new ExtBuilderError(`分析 JavaScript 依赖失败 ${relativePath}: ${asErrorMessage(scriptError)}`, {
+      throw new ExtbError(`分析 JavaScript 依赖失败 ${relativePath}: ${asErrorMessage(scriptError)}`, {
         cause: moduleError,
       });
     }
@@ -387,7 +387,7 @@ function resolveReference(reference: DependencyReference): string | undefined {
   try {
     value = decodeURIComponent(url.pathname);
   } catch (error) {
-    throw new ExtBuilderError(`资源路径包含无效 URL 编码（${reference.reason}）: ${reference.value}`, { cause: error });
+    throw new ExtbError(`资源路径包含无效 URL 编码（${reference.reason}）: ${reference.value}`, { cause: error });
   }
   const relative = path.posix.normalize(value.replace(/^\/+/, ''));
   return relative === '.' || relative === '' ? undefined : relative;
@@ -408,7 +408,7 @@ function collectDnrReferences(source: string, relativePath: string): DependencyR
   try {
     rules = JSON.parse(source) as unknown;
   } catch (error) {
-    throw new ExtBuilderError(`解析 DNR 规则文件失败 ${relativePath}: ${asErrorMessage(error)}`, { cause: error });
+    throw new ExtbError(`解析 DNR 规则文件失败 ${relativePath}: ${asErrorMessage(error)}`, { cause: error });
   }
   const references: DependencyReference[] = [];
   if (!Array.isArray(rules)) return references;
@@ -445,7 +445,7 @@ export async function collectRequiredSourceFiles(options: DependencyCollectionOp
   for (const pattern of options.include) {
     queue.push({
       value: pattern,
-      from: 'extbuilder include',
+      from: 'extb include',
       reason: `include: ${pattern}`,
       rootRelative: true,
       glob: /[*?[\]{}()]/.test(pattern),
@@ -475,7 +475,7 @@ export async function collectRequiredSourceFiles(options: DependencyCollectionOp
 
     const file = inventoryByPath.get(resolved);
     if (file === undefined) {
-      throw new ExtBuilderError(`必需资源不存在或已被排除: ${resolved}\n来源: ${reference.from}（${reference.reason}）`);
+      throw new ExtbError(`必需资源不存在或已被排除: ${resolved}\n来源: ${reference.from}（${reference.reason}）`);
     }
     selected.set(file.relativePath, file);
     if (processed.has(file.relativePath)) continue;

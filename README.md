@@ -1,51 +1,133 @@
-# extbuilder
+# extb
 
-`extbuilder` 是一个面向 Chrome、Edge、Firefox 等 WebExtension 源码目录的安全打包工具。它从 `manifest.json` 建立依赖图，只打包插件实际引用或显式包含的文件，保持文件名和相对路径不变，默认保守压缩 HTML、JavaScript、CSS，并同时生成可直接加载的目录和商店上传用 ZIP。
+`extb` 是面向 Chrome、Edge、Firefox 等 WebExtension 的依赖感知型打包工具。它从 `manifest.json` 出发分析插件真正依赖的文件，压缩 HTML/CSS/JavaScript，并可选执行 JavaScript 深度混淆和 ES5 转译，最后输出可直接加载的目录与商店上传用 ZIP。
+
+## 特性
+
+- 递归发现唯一的 `manifest.json`，也可通过命令显式指定。
+- manifest 扫描自动忽略默认或自定义输出目录，以及残留的构建临时/备份目录。
+- 只打包 manifest 入口及其递归依赖，不会复制 `.git`、`.idea`、源码备注等无关文件。
+- 追踪 HTML 资源、CSS `url()`/`@import`、ES modules、Worker、`importScripts()`、`runtime.getURL()`、DNR 规则和 Web Accessible Resources。
+- 默认安全压缩 HTML、CSS 和 JavaScript，不改变文件名、目录结构及资源 URL。
+- 可选使用 Terser 深度压缩并混淆顶层标识符。
+- 可选使用 Babel 将箭头函数、class、可选链等 ES6+ 语法降级到 ES5。
+- 在临时目录中完成构建；失败时保留原有输出。
+- 同时提供 CLI 与 Node.js API，要求 Node.js 20 或更高版本。
 
 ## 安装
 
 全局安装：
 
 ```bash
-npm install -g extbuilder
-eb ./extension
-# 等价的长命令：extbuilder ./extension
+npm install -g @mosbydev/extb
+extb --help
 ```
 
-作为开发依赖：
+安装为项目开发依赖：
 
 ```bash
-npm install --save-dev extbuilder
-npx eb ./extension
+npm install -D @mosbydev/extb
+npx extb ./extension
 ```
 
-也可以添加 npm script：
+不安装、直接执行指定包：
 
-```json
-{
-  "scripts": {
-    "build:extension": "eb ./extension"
-  }
-}
+```bash
+npx --package @mosbydev/extb extb ./extension
 ```
 
-## 默认行为
+`extb` 是完整命令名，`eb` 是等价的短命令：
 
-- 从给定根目录（默认当前目录）递归查找唯一的 `manifest.json`。
-- 以 manifest 所在目录为扩展源码根目录，只复制 manifest 入口及其递归依赖。
-- 自动追踪 HTML 本地链接、CSS `url()`/`@import`、JavaScript 模块、Worker、`runtime.getURL()`、DNR 规则和 Web Accessible Resources。
-- `_locales` 本地化资源自动包含；无法静态识别的动态路径可通过 `include` 补充。
-- 默认压缩 `.html`、`.htm`、`.js`、`.mjs`、`.cjs` 和 `.css`；其他资源原样复制。
-- 默认输出到 `<root>/dist`，并生成 `dist/<源码目录名>-<版本>.zip`。
-- 默认不混淆 JavaScript。使用 `--obfuscate` 显式启用保守的局部变量改名。
-- 默认不改变 JavaScript 语法级别；使用 `--target es5` 可将 ES6+ 语法转译为 ES5。
-- 使用 `--aggressive-js` 可启用多轮完整压缩及顶层标识符混淆。
-- 不进行 bundling、文件名哈希、CSS URL rebasing 或 `@import` 内联。
+```bash
+extb ./extension
+eb ./extension
+```
+
+## 快速开始
+
+在扩展项目目录执行：
+
+```bash
+extb .
+```
+
+默认生成：
+
+```text
+dist/
+├─ manifest.json
+├─ ...插件运行所需文件
+└─ <源码目录名>-<manifest.version>.zip
+```
+
+找到多个 manifest 时必须明确指定：
+
+```bash
+extb . --manifest ./extensions/example/manifest.json
+```
+
+自定义输出目录并关闭 ZIP：
+
+```bash
+extb ./extension --out-dir ./release --no-zip
+```
+
+## JavaScript 处理
+
+默认模式只移除注释和多余格式，不改写顶层名称，也不执行可能改变副作用顺序的激进优化：
+
+```bash
+extb ./extension
+```
+
+保守混淆只重命名局部标识符：
+
+```bash
+extb ./extension --obfuscate
+```
+
+深度压缩会执行多轮 Terser 优化，并混淆局部及顶层标识符：
+
+```bash
+extb ./extension --aggressive-js
+```
+
+将 ES6+ 语法转译为 ES5：
+
+```bash
+extb ./extension --target es5
+```
+
+组合使用深度压缩、混淆和 ES5 输出：
+
+```bash
+extb ./extension --aggressive-js --target es5
+```
+
+## 文件收集规则
+
+extb 以 manifest 所在目录为源码根目录，只收集插件静态依赖。运行时拼接出来的资源路径无法可靠静态分析，应使用可重复的 `--include` 补充：
+
+```bash
+extb ./extension \
+  --include "data/**" \
+  --include "dynamic/page.html"
+```
+
+额外排除文件：
+
+```bash
+extb ./extension \
+  --exclude "vendor/debug/**" \
+  --exclude "**/*.map"
+```
+
+如果 manifest 或已发现文件静态引用的资源不存在、越过源码根目录或被排除，构建会直接失败，不会生成残缺扩展包。
 
 ## CLI
 
 ```text
-eb [root]
+extb [root]
   -c, --config <file>
   -m, --manifest <file>
   -o, --out-dir <dir>
@@ -65,67 +147,31 @@ eb [root]
   -h, --help
 ```
 
-`eb` 是短命令，`extbuilder` 是功能完全相同的长命令别名：
-
-```bash
-eb --help
-extbuilder --help
-eb -v
-extbuilder --version
-```
-
-找到多个 manifest 时必须明确指定：
-
-```bash
-eb . --manifest ./extensions/example/manifest.json
-```
-
-分项关闭压缩或排除文件：
-
-```bash
-eb ./extension --no-minify-html --exclude "vendor/**" --exclude "**/*.map"
-```
-
-运行时拼接的资源路径无法通过静态分析确定，可以显式加入：
-
-```bash
-eb ./extension --include "data/**" --include "dynamic/page.html"
-```
-
-将箭头函数、class、可选链、空值合并等现代语法降级到 ES5：
-
-```bash
-eb ./extension --target es5
-```
-
-启用深度压缩和顶层名称混淆，并同时输出 ES5：
-
-```bash
-eb ./extension --aggressive-js --target es5
-```
-
-CLI 路径相对当前工作目录。CLI 显式参数优先于配置文件。
+`root` 默认为当前目录。CLI 中的路径相对当前工作目录；显式 CLI 参数优先于配置文件。
 
 ## 配置文件
 
-工具会在 root 目录中查找唯一的以下配置文件：
+extb 会在 root 目录中自动发现唯一的以下文件：
 
 ```text
-extbuilder.config.ts  extbuilder.config.mts  extbuilder.config.cts
-extbuilder.config.js  extbuilder.config.mjs  extbuilder.config.cjs
-extbuilder.config.json
+extb.config.ts  extb.config.mts  extb.config.cts
+extb.config.js  extb.config.mjs  extb.config.cjs
+extb.config.json
 ```
 
-TypeScript/JavaScript 示例：
+推荐使用 TypeScript 配置：
 
 ```ts
-import { defineConfig } from 'extbuilder';
+import { defineConfig } from '@mosbydev/extb';
 
 export default defineConfig({
   root: './extension',
   outDir: './release',
-  exclude: ['tests/**', '**/*.map'],
+
+  // 静态分析无法发现时强制包含，并继续追踪这些文件的依赖。
   include: ['data/**'],
+  exclude: ['tests/**', '**/*.map'],
+
   minify: {
     enabled: true,
     html: true,
@@ -133,17 +179,20 @@ export default defineConfig({
     css: true,
     exclude: ['vendor/**'],
   },
+
   obfuscate: {
-    enabled: false,
-    mode: 'safe', // 可设为 aggressive
+    enabled: true,
+    mode: 'safe', // 可改为 aggressive
     exclude: ['vendor/**'],
     reservedNames: ['publicApiName'],
   },
+
   transpile: {
     enabled: true,
     target: 'es5',
     exclude: ['vendor/modern-only.js'],
   },
+
   zip: {
     enabled: true,
     fileName: 'extension-release.zip',
@@ -151,21 +200,32 @@ export default defineConfig({
 });
 ```
 
-配置文件中的路径相对配置文件目录。多个自动发现的配置文件会被视为错误，可用 `--config` 指定其中一个。
+配置文件内的路径相对配置文件目录。发现多个配置文件时会报错，可通过 `--config` 明确指定。
+
+配置优先级：
+
+```text
+内置默认值 < 配置文件 < CLI 参数或 build() 参数
+```
 
 ## Node.js API
 
 ```ts
-import { build, loadConfig, defineConfig } from 'extbuilder';
+import { build, defineConfig, loadConfig } from '@mosbydev/extb';
 
 const config = defineConfig({
   root: './extension',
-  obfuscate: false,
+  outDir: './release',
+  transpile: { enabled: true, target: 'es5' },
 });
 
 const resolved = await loadConfig({ overrides: config });
 const result = await build(config);
-console.log(result.outDir, result.zipPath, resolved.minify);
+
+console.log(result.outDir);
+console.log(result.zipPath);
+console.log(result.files);
+console.log(resolved.minify);
 ```
 
 公开 API：
@@ -173,17 +233,19 @@ console.log(result.outDir, result.zipPath, resolved.minify);
 ```ts
 build(options?: BuildOptions): Promise<BuildResult>
 loadConfig(options?: LoadConfigOptions): Promise<ResolvedConfig>
-defineConfig(config: ExtBuilderConfig): ExtBuilderConfig
+defineConfig(config: ExtbConfig): ExtbConfig
 ```
 
-## 功能安全说明
+## 兼容性说明
 
-默认 JS 压缩只移除注释和多余格式，不合并模块，也不改名。启用 `--obfuscate` 后只重命名局部标识符，并保留顶层、属性、函数和类名称。
+- `--aggressive-js` 可能改写跨文件共享的全局变量、函数名、类名以及 `Function.name`。使用 `obfuscate.reservedNames` 保留公开名称，或通过 `obfuscate.exclude` 排除依赖反射、`eval` 和源码字符串的文件。
+- 对象属性名不会被混淆，Terser 的 `unsafe` 优化保持关闭。
+- ES5 转译不会自动注入 `Promise`、`Map`、`Set` 等运行时 polyfill。
+- 为保持浏览器原生模块路径和加载方式，`import`/`export` 不会转成 CommonJS；模块内部的现代语法仍会降级。
+- extb 不编译 TypeScript、JSX、Sass，也不执行 JavaScript bundling。
 
-`--aggressive-js` 会执行三轮 Terser 压缩、删除不可达代码并混淆顶层变量、函数和类名称。它仍不会混淆对象属性，也不会启用 Terser 的 `unsafe` 优化。跨文件依赖全局名称、源码字符串、反射、`eval` 或 `Function.name` 的代码，应通过 `obfuscate.reservedNames` 保留名称，或使用 `obfuscate.exclude` 排除，并进行浏览器回归测试。
+建议在启用激进混淆或 ES5 转译后，分别在目标浏览器中回归测试后台脚本、内容脚本、弹窗页面和动态资源加载。
 
-`--target es5` 使用 Babel preset-env 转换箭头函数、class、展开语法、默认参数、可选链等 ES6+ 语法。为保持浏览器扩展的原生模块路径和加载方式，`import`/`export` 不会被转换为 CommonJS；ES5 转译只提供语法兼容，不自动注入 Promise、Map 等运行时 polyfill。
+## License
 
-依赖收集只能识别静态字符串。对于模板字符串插值、运行时拼接路径、从服务器响应中取得的资源名等场景，应使用 `include`；如果静态引用的文件不存在或被 `exclude` 排除，构建会直接失败而不是产生残缺包。
-
-输出采用临时目录构建并在成功后替换，因此压缩、写入或 ZIP 失败不会破坏已有产物。
+[MIT](./LICENSE)

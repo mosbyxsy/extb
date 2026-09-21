@@ -1,7 +1,7 @@
 import { createWriteStream } from 'node:fs';
 import path from 'node:path';
 import archiver from 'archiver';
-import { ExtBuilderError } from './errors.js';
+import { ExtbError } from './errors.js';
 
 /**
  * 将已经写入临时输出目录的文件流式打包为 ZIP。
@@ -36,6 +36,6 @@ export async function createZip(
     // finalize 返回 Promise，但流事件仍是最终完成信号；这里仅把异步拒绝转发给外层。
     void archive.finalize().catch(reject);
   }).catch((error: unknown) => {
-    throw new ExtBuilderError(`创建 ZIP 失败: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    throw new ExtbError(`创建 ZIP 失败: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   });
 }

@@ -4,7 +4,7 @@ import presetEnv from '@babel/preset-env';
 import CleanCSS from 'clean-css';
 import { minify as minifyHtml } from 'html-minifier-terser';
 import { minify as minifyJavaScript } from 'terser';
-import { ExtBuilderError } from './errors.js';
+import { ExtbError } from './errors.js';
 import { matchesAny } from './paths.js';
 import type { ResolvedConfig } from './types.js';
 
@@ -66,7 +66,7 @@ async function transpileJavaScriptToEs5(source: string): Promise<string> {
     ],
   });
   if (result?.code === undefined || result.code === null) {
-    throw new ExtBuilderError('Babel 未生成 JavaScript 输出。');
+    throw new ExtbError('Babel 未生成 JavaScript 输出。');
   }
   return result.code;
 }
@@ -117,7 +117,7 @@ async function transformJavaScript(
       comments: /^!/,
     },
   });
-  if (result.code === undefined) throw new ExtBuilderError('Terser 未生成 JavaScript 输出。');
+  if (result.code === undefined) throw new ExtbError('Terser 未生成 JavaScript 输出。');
   return result.code;
 }
 
@@ -131,7 +131,7 @@ function transformCss(source: string): string {
     level: 1,
     rebase: false,
   }).minify(source);
-  if (result.errors.length > 0) throw new ExtBuilderError(`CSS 压缩失败: ${result.errors.join('; ')}`);
+  if (result.errors.length > 0) throw new ExtbError(`CSS 压缩失败: ${result.errors.join('; ')}`);
   return result.styles;
 }
 

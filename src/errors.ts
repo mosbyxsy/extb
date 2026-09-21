@@ -1,13 +1,13 @@
 /**
- * extbuilder 的领域错误。
+ * extb 的领域错误。
  *
  * 使用独立错误类型便于调用方区分“构建失败”和普通编程异常；cause 会保留底层
  * 文件系统或第三方压缩器抛出的原始错误，方便继续诊断。
  */
-export class ExtBuilderError extends Error {
+export class ExtbError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
-    this.name = 'ExtBuilderError';
+    this.name = 'ExtbError';
   }
 }
 

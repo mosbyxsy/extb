@@ -36,8 +36,8 @@ interface CliOptions {
 export interface CliDependencies {
   build?: (options?: BuildOptions) => Promise<BuildResult>;
   write?: (text: string) => void;
-  /** 帮助文本中显示的命令名；两个 bin 入口分别传入 eb 和 extbuilder。 */
-  commandName?: 'eb' | 'extbuilder';
+  /** 帮助文本中显示的命令名；两个 bin 入口分别传入 eb 和 extb。 */
+  commandName?: 'eb' | 'extb';
 }
 
 /** Commander 对重复 --exclude 的累加器。 */
@@ -142,7 +142,7 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
     // 覆盖 Commander 默认的 process.exit()，让嵌入式 API 和测试都能安全调用帮助/版本参数。
     .exitOverride()
     .argument('[root]', '查找 manifest.json 的根目录，默认是当前目录')
-    .option('-c, --config <file>', '指定 extbuilder 配置文件')
+    .option('-c, --config <file>', '指定 extb 配置文件')
     .option('-m, --manifest <file>', '指定 manifest.json 路径')
     .option('-o, --out-dir <dir>', '输出目录，默认是 <root>/dist')
     .option('--minify', '启用 HTML、JavaScript 和 CSS 压缩')
@@ -171,7 +171,7 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
       const ratio = result.bytesBefore === 0 ? 0 : 1 - result.bytesAfter / result.bytesBefore;
       write(
         [
-          `extbuilder: 已输出到 ${result.outDir}`,
+          `extb: 已输出到 ${result.outDir}`,
           `文件: ${result.files.copied} 个；HTML ${result.files.html}；JS ${result.files.js}；CSS ${result.files.css}；混淆 ${result.files.obfuscated}；转译 ${result.files.transpiled}`,
           `体积: ${formatBytes(result.bytesBefore)} -> ${formatBytes(result.bytesAfter)}（减少 ${(ratio * 100).toFixed(1)}%）`,
           ...(result.zipPath === undefined ? [] : [`ZIP: ${result.zipPath}`]),

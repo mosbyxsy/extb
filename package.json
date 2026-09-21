@@ -1,15 +1,18 @@
 {
-  "name": "@mosbydev/extbuilder",
+  "name": "@mosbydev/extb",
   "version": "0.1.0",
-  "description": "A safe, configurable packager for browser extension source directories.",
+  "description": "A dependency-aware minifier, obfuscator, transpiler and packager for browser extensions.",
   "type": "module",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20"
   },
   "bin": {
     "eb": "./lib/cli.js",
-    "extbuilder": "./lib/extbuilder.js"
+    "extb": "./lib/extb.js"
   },
   "exports": {
     ".": {
@@ -17,13 +20,13 @@
       "import": "./lib/index.js"
     }
   },
-  "homepage": "https://github.com/mosbyxsy/extbuilder#readme",
+  "homepage": "https://github.com/mosbyxsy/extb#readme",
   "bugs": {
-    "url": "https://github.com/mosbyxsy/extbuilder/issues"
+    "url": "https://github.com/mosbyxsy/extb/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mosbyxsy/extbuilder.git"
+    "url": "git+https://github.com/mosbyxsy/extb.git"
   },
   "author": {
     "name": "mosbyxsy",
@@ -69,6 +72,7 @@
   },
   "keywords": [
     "browser-extension",
+    "extb",
     "chrome-extension",
     "firefox-addon",
     "webextension",
