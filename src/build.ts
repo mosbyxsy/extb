@@ -174,8 +174,8 @@ async function replaceDirectory(stageDir: string, outDir: string, backupDir: str
  * 在 replaceDirectory 成功之前，所有写操作都只发生在唯一的临时目录中。
  */
 export async function build(options: BuildOptions = {}): Promise<BuildResult> {
-  // cwd/configFile 是加载上下文，不属于写入配置文件的 ExtbConfig，需单独拆出。
-  const { cwd, configFile, ...overrides } = options;
+  // cwd/configFile/dryRun 是调用上下文，不属于写入配置文件的 ExtbConfig，需单独拆出。
+  const { cwd, configFile, dryRun = false, ...overrides } = options;
   const config = await loadConfig({
     ...(cwd === undefined ? {} : { cwd }),
     ...(configFile === undefined ? {} : { configFile }),
@@ -214,30 +214,36 @@ export async function build(options: BuildOptions = {}): Promise<BuildResult> {
     include: config.include,
   });
 
-  // UUID 使并行构建不会争用同一个临时/备份目录；两个目录都和 outDir 同级。
-  const parentDir = path.dirname(outDir);
-  const outName = path.basename(outDir);
-  const token = randomUUID();
-  const stageDir = path.join(parentDir, `.${outName}.extb-tmp-${token}`);
-  const backupDir = path.join(parentDir, `.${outName}.extb-backup-${token}`);
-  await mkdir(parentDir, { recursive: true });
-  await mkdir(stageDir, { recursive: false });
+  // dry-run 不得创建任何目录；普通构建才准备同级临时/备份路径用于原子替换。
+  let stageDir: string | undefined;
+  let backupDir: string | undefined;
+  if (!dryRun) {
+    const parentDir = path.dirname(outDir);
+    const outName = path.basename(outDir);
+    const token = randomUUID();
+    stageDir = path.join(parentDir, `.${outName}.extb-tmp-${token}`);
+    backupDir = path.join(parentDir, `.${outName}.extb-backup-${token}`);
+    await mkdir(parentDir, { recursive: true });
+    await mkdir(stageDir, { recursive: false });
+  }
 
   // bytesAfter 不包含 ZIP，便于与原始文件体积做有意义的压缩率比较。
   const counts = { copied: 0, html: 0, js: 0, css: 0, obfuscated: 0, transpiled: 0 };
   let bytesBefore = 0;
   let bytesAfter = 0;
   let zipPath: string | undefined;
+  let plannedZipPath: string | undefined;
 
   try {
     for (const file of files) {
-      const destination = path.join(stageDir, ...file.relativePath.split('/'));
-      await mkdir(path.dirname(destination), { recursive: true });
+      const destination =
+        stageDir === undefined ? undefined : path.join(stageDir, ...file.relativePath.split('/'));
+      if (destination !== undefined) await mkdir(path.dirname(destination), { recursive: true });
       bytesBefore += file.size;
 
       if (!TEXT_EXTENSIONS.has(path.posix.extname(file.relativePath).toLowerCase())) {
         // manifest 和所有未知资源都走 copyFile，保证内容逐字节不变。
-        await copyFile(file.sourcePath, destination);
+        if (destination !== undefined) await copyFile(file.sourcePath, destination);
         bytesAfter += file.size;
         counts.copied += 1;
         continue;
@@ -247,7 +253,7 @@ export async function build(options: BuildOptions = {}): Promise<BuildResult> {
         // 文本转换失败时附加包内相对路径，让 CLI 能直接指出问题源码。
         const source = await readFile(file.sourcePath, 'utf8');
         const processed = await processTextFile(source, file.relativePath, config);
-        await writeFile(destination, processed.content, 'utf8');
+        if (destination !== undefined) await writeFile(destination, processed.content, 'utf8');
         bytesAfter += Buffer.byteLength(processed.content);
         counts[processed.kind] += 1;
         if (processed.obfuscated) counts.obfuscated += 1;
@@ -261,31 +267,39 @@ export async function build(options: BuildOptions = {}): Promise<BuildResult> {
       // 默认不使用 manifest.name，因为它可能是 __MSG_name__ 或包含文件系统非法字符。
       const defaultZipName = `${sanitizeFilePart(path.basename(sourceDir))}-${sanitizeFilePart(manifest.version)}.zip`;
       const zipName = validateZipName(config.zip.fileName ?? defaultZipName);
-      const stageZipPath = path.join(stageDir, zipName);
-      await createZip(
-        stageDir,
-        stageZipPath,
-        files.map((file) => file.relativePath),
-      );
-      // ZIP 此时仍在 stageDir，返回值必须预先换算成原子替换后的正式路径。
-      zipPath = path.join(outDir, zipName);
+      plannedZipPath = path.join(outDir, zipName);
+      if (stageDir !== undefined) {
+        const stageZipPath = path.join(stageDir, zipName);
+        await createZip(
+          stageDir,
+          stageZipPath,
+          files.map((file) => file.relativePath),
+        );
+        // ZIP 此时仍在 stageDir，返回值必须预先换算成原子替换后的正式路径。
+        zipPath = plannedZipPath;
+      }
     }
 
-    await replaceDirectory(stageDir, outDir, backupDir);
+    if (stageDir !== undefined && backupDir !== undefined) {
+      await replaceDirectory(stageDir, outDir, backupDir);
+    }
   } catch (error) {
     // force 允许处理“压缩失败发生在目录尚未完整创建”的情况；原始异常继续向上抛出。
-    await rm(stageDir, { recursive: true, force: true });
+    if (stageDir !== undefined) await rm(stageDir, { recursive: true, force: true });
     throw error;
   }
 
   const result: BuildResult = {
+    dryRun,
     manifestPath,
     sourceDir,
     outDir,
+    includedFiles: files.map((file) => file.relativePath).sort((left, right) => left.localeCompare(right)),
     files: counts,
     bytesBefore,
     bytesAfter,
   };
   if (zipPath !== undefined) result.zipPath = zipPath;
+  if (dryRun && plannedZipPath !== undefined) result.plannedZipPath = plannedZipPath;
   return result;
 }

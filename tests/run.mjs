@@ -554,6 +554,75 @@ test('keeps ZIP disabled by default and lets zip-name enable it explicitly', asy
   });
 });
 
+test('dry-run validates and transforms the complete build without writing output', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    const plannedOutput = path.join(root, 'planned-output');
+    await createExtension(extension);
+    await write(plannedOutput, 'sentinel.txt', 'keep me');
+
+    const result = await build({
+      cwd: root,
+      root: extension,
+      outDir: plannedOutput,
+      zip: true,
+      dryRun: true,
+    });
+    assert.equal(result.dryRun, true);
+    assert.equal(result.zipPath, undefined);
+    assert.equal(result.plannedZipPath, path.join(plannedOutput, 'extension-1.2.3.zip'));
+    assert.deepEqual(result.includedFiles, [
+      'images/icon.bin',
+      'manifest.json',
+      'popup.html',
+      'scripts/background.js',
+      'styles/popup.css',
+    ]);
+    assert.ok(result.bytesAfter < result.bytesBefore);
+    assert.equal(await readFile(path.join(plannedOutput, 'sentinel.txt'), 'utf8'), 'keep me');
+    await assert.rejects(() => readFile(path.join(plannedOutput, 'manifest.json')));
+    await assert.rejects(() => readFile(path.join(plannedOutput, 'extension-1.2.3.zip')));
+  });
+});
+
+test('supports dry-run file listing and quiet successful builds in the CLI', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    const previewOutput = path.join(root, 'preview-output');
+    await createExtension(extension);
+
+    let stdout = '';
+    await runCli(
+      [
+        process.execPath,
+        'extb',
+        extension,
+        '--out-dir',
+        previewOutput,
+        '--dry-run',
+        '--list-files',
+        '--zip',
+      ],
+      { commandName: 'extb', write: (text) => (stdout += text) },
+    );
+    assert.match(stdout, /预演完成，未写入/);
+    assert.match(stdout, /计划 ZIP:/);
+    assert.match(stdout, /包含文件 \(5\):/);
+    assert.match(stdout, /  manifest\.json/);
+    assert.doesNotMatch(stdout, /unused\.js/);
+    await assert.rejects(() => readFile(path.join(previewOutput, 'manifest.json')));
+
+    stdout = '';
+    const quietOutput = path.join(root, 'quiet-output');
+    await runCli(
+      [process.execPath, 'extb', extension, '--out-dir', quietOutput, '--quiet'],
+      { commandName: 'extb', write: (text) => (stdout += text) },
+    );
+    assert.equal(stdout, '');
+    await readFile(path.join(quietOutput, 'manifest.json'));
+  });
+});
+
 test('enables aggressive JavaScript processing and ES5 output through CLI flags', async () => {
   await withTemporaryDirectory(async (root) => {
     const extension = path.join(root, 'extension');
@@ -627,9 +696,11 @@ test('supports no-config, no-transform, keep-name, and JSON CLI output', async (
     );
 
     const result = JSON.parse(stdout);
+    assert.equal(result.dryRun, false);
     assert.equal(result.outDir, path.join(extension, 'dist'));
     assert.equal(result.zipPath, undefined);
     assert.equal(result.files.obfuscated, 1);
+    assert.ok(result.includedFiles.includes('manifest.json'));
     assert.equal(await readFile(path.join(result.outDir, 'popup.html'), 'utf8'), originalPopup);
     assert.match(await readFile(path.join(result.outDir, 'scripts/background.js'), 'utf8'), /localLongName/);
     assert.doesNotMatch(stdout, /extb: 已输出到/);
@@ -647,6 +718,9 @@ test('rejects contradictory CLI flags before starting a build', async () => {
     ['--aggressive-js', '--no-obfuscate'],
     ['--aggressive-js', '--no-minify-js'],
     ['--zip-name', 'release.zip', '--no-zip'],
+    ['--quiet', '--json'],
+    ['--quiet', '--list-files'],
+    ['--defaults', '--show-config'],
   ];
   for (const flags of conflicts) {
     await assert.rejects(
@@ -664,6 +738,97 @@ test('suppresses Commander duplicate error output', async () => {
     /只能是 'modern' 或 'es5'/,
   );
   assert.equal(stdout, '');
+});
+
+test('prints built-in defaults through an option without starting a build', async () => {
+  let stdout = '';
+  let buildCalls = 0;
+  await runCli([process.execPath, 'extb', '--defaults'], {
+    commandName: 'extb',
+    build: async () => {
+      buildCalls += 1;
+      throw new Error('--defaults 不应启动构建');
+    },
+    write: (text) => (stdout += text),
+  });
+
+  const defaults = JSON.parse(stdout);
+  assert.equal(defaults.root, '.');
+  assert.equal(defaults.outDir, './dist');
+  assert.equal(defaults.minify.enabled, true);
+  assert.equal(defaults.obfuscate.enabled, false);
+  assert.deepEqual(defaults.transpile, { enabled: false, target: 'modern', exclude: [] });
+  assert.deepEqual(defaults.zip, { enabled: false });
+  assert.ok(defaults.exclude.includes('node_modules'));
+  assert.equal(buildCalls, 0);
+});
+
+test('prints the merged final configuration without finding a manifest or starting a build', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const configPath = path.join(root, 'custom.config.json');
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        outDir: './release',
+        include: ['from-config/**'],
+        minify: false,
+        zip: true,
+      }),
+    );
+
+    let stdout = '';
+    let buildCalls = 0;
+    await runCli(
+      [
+        process.execPath,
+        'extb',
+        root,
+        '--config',
+        configPath,
+        '--show-config',
+        '--minify-js',
+        '--no-zip',
+        '--include',
+        'from-cli/**',
+      ],
+      {
+        commandName: 'extb',
+        build: async () => {
+          buildCalls += 1;
+          throw new Error('--show-config 不应启动构建');
+        },
+        write: (text) => (stdout += text),
+      },
+    );
+
+    const resolved = JSON.parse(stdout);
+    assert.equal(resolved.root, root);
+    assert.equal(resolved.outDir, path.join(root, 'release'));
+    assert.equal(resolved.configFile, configPath);
+    assert.deepEqual(resolved.include, ['from-config/**', 'from-cli/**']);
+    assert.deepEqual(
+      { enabled: resolved.minify.enabled, html: resolved.minify.html, js: resolved.minify.js, css: resolved.minify.css },
+      { enabled: true, html: false, js: true, css: false },
+    );
+    assert.equal(resolved.zip.enabled, false);
+    assert.equal(buildCalls, 0);
+  });
+});
+
+test('keeps a directory named defaults available as the positional root', async () => {
+  let receivedOptions;
+  await assert.rejects(
+    () =>
+      runCli([process.execPath, 'extb', 'defaults'], {
+        commandName: 'extb',
+        build: async (options) => {
+          receivedOptions = options;
+          throw new Error('停止测试构建');
+        },
+      }),
+    /停止测试构建/,
+  );
+  assert.equal(receivedOptions.root, 'defaults');
 });
 
 test('supports short and long command names with help and version flags', async () => {
@@ -688,6 +853,11 @@ test('supports short and long command names with help and version flags', async 
   assert.match(stdout, /--no-transform <glob>/);
   assert.match(stdout, /--keep-name <name>/);
   assert.match(stdout, /--json/);
+  assert.match(stdout, /--dry-run/);
+  assert.match(stdout, /--list-files/);
+  assert.match(stdout, /--quiet/);
+  assert.match(stdout, /--defaults\s+以 JSON 显示内置默认配置并退出/);
+  assert.match(stdout, /--show-config\s+以 JSON 显示合并后的最终配置并退出/);
   assert.doesNotMatch(stdout, /--transpile/);
   assert.match(stdout, /生成 ZIP（默认：关闭）/);
   assert.match(stdout, /默认：modern/);

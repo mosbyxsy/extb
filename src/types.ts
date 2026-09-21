@@ -82,6 +82,8 @@ export interface BuildOptions extends ExtbConfig {
   cwd?: string;
   /** Explicit config path, false to disable loading, or undefined to auto-discover. */
   configFile?: string | false;
+  /** 完整执行分析和文本转换，但不创建、替换输出目录或生成 ZIP。 */
+  dryRun?: boolean;
 }
 
 /** loadConfig() 的加载上下文和覆盖项。 */
@@ -165,6 +167,8 @@ export interface BuildFileCounts {
 
 /** build() 返回给 CLI 或第三方调用者的构建摘要。 */
 export interface BuildResult {
+  /** 是否为未写入文件系统的预演构建。 */
+  dryRun: boolean;
   /** 实际使用的源 manifest 绝对路径。 */
   manifestPath: string;
   /** manifest 所在目录，也是保持相对路径的基准目录。 */
@@ -173,6 +177,10 @@ export interface BuildResult {
   outDir: string;
   /** 开启 ZIP 时的最终 ZIP 绝对路径。 */
   zipPath?: string;
+  /** dry-run 且启用 ZIP 时，返回原本会生成的 ZIP 路径。 */
+  plannedZipPath?: string;
+  /** 最终依赖闭包中的包内相对文件路径，不包含 ZIP 本身。 */
+  includedFiles: string[];
   /** 各处理类型的文件数量。 */
   files: BuildFileCounts;
   /** 所有输入文件处理前的总字节数。 */

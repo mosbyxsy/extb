@@ -8,9 +8,12 @@
 - [安装](#安装)
 - [快速开始](#快速开始)
 - [默认配置](#默认配置)
+- [查看默认配置](#查看默认配置)
+- [查看最终配置](#查看最终配置)
 - [JavaScript 处理](#javascript-处理)
 - [文件收集规则](#文件收集规则)
 - [CLI](#cli)
+- [构建预演与输出控制](#构建预演与输出控制)
 - [CLI 与配置文件对应关系](#cli-与配置文件对应关系)
 - [配置文件](#配置文件)
 - [Node.js API](#nodejs-api)
@@ -27,6 +30,7 @@
 - 可选使用 Terser 深度压缩并混淆顶层标识符。
 - 可选使用 Babel 将箭头函数、class、可选链等 ES6+ 语法降级到 ES5。
 - 在同级临时目录完成构建；失败时保留原有输出。
+- 支持零写入构建预演、依赖文件清单和静默模式。
 - 提供 CLI 和 Node.js API，要求 Node.js 20 或更高版本。
 
 ## 安装
@@ -137,7 +141,39 @@ defineConfig({
 });
 ```
 
-工具还会默认排除版本库目录、`node_modules`、`extb.config.*`、系统临时文件、日志文件以及 extb 构建临时/备份目录。完整运行时默认值可以通过 `loadConfig()` 查看。
+工具还会默认排除版本库目录、`node_modules`、`extb.config.*`、系统临时文件、日志文件以及 extb 构建临时/备份目录。
+
+## 查看默认配置
+
+输出当前安装版本的完整内置默认配置：
+
+```bash
+extb --defaults
+```
+
+`eb --defaults` 完全等价。该选项以格式化 JSON 输出配置后立即退出，不加载当前项目的 `extb.config.*`，也不会查找 `manifest.json`、启动构建或写入文件，因此可以安全地在任意目录执行。路径使用可复制的相对形式：`root` 为 `.`，`outDir` 为 `./dist`。
+
+Node.js API 使用者也可以调用 `loadConfig({ configFile: false })` 获取经过归一化的默认值；API 返回的路径是绝对路径。
+
+## 查看最终配置
+
+查看应用配置文件和 CLI 参数后的最终配置：
+
+```bash
+extb ./extension --show-config
+```
+
+也可以同时指定配置文件和覆盖参数，用于检查配置优先级：
+
+```bash
+extb ./extension \
+  --config ./configs/release.ts \
+  --show-config \
+  --target es5 \
+  --zip
+```
+
+输出是经过补全和归一化的 JSON，路径字段为实际使用的绝对路径。该选项会加载配置文件并应用 CLI 覆盖，但不会查找或读取 `manifest.json`，也不会执行构建或写入输出目录。配置优先级仍为“内置默认值 < 配置文件 < CLI 参数”。
 
 ## JavaScript 处理
 
@@ -216,7 +252,7 @@ extb --help
 参数摘要：
 
 ```text
-Usage: eb [options] [root]
+Usage: extb [options] [root]
 
 压缩并打包浏览器扩展源码目录
 
@@ -225,6 +261,8 @@ Arguments:
 
 通用选项：
   -v, --version          显示版本号
+  --defaults             以 JSON 显示内置默认配置并退出
+  --show-config          以 JSON 显示合并后的最终配置并退出
   -h, --help             显示帮助信息
 
 输入选项：
@@ -259,7 +297,11 @@ Arguments:
   --no-transform <glob>  打包文件但保持内容不变，可重复使用（默认：无）
 
 报告选项：
+  --dry-run             完整预演构建但不写入文件（默认：关闭）
+  --list-files          输出最终打包文件列表（默认：关闭）
+  --quiet               成功时不输出任何内容（默认：关闭）
   --json                 以 JSON 输出构建结果（默认：可读文本）
+
 ```
 
 `root` 默认为当前目录。CLI 路径相对当前工作目录；显式 CLI 参数优先于配置文件。`--target es5` 启用转译，`--target modern` 保持现代语法并覆盖配置文件中的 ES5 转译。
@@ -275,6 +317,33 @@ extb ./extension --json
 ```bash
 extb ./extension --no-config
 ```
+
+## 构建预演与输出控制
+
+完整执行 manifest 解析、依赖收集、压缩、混淆和转译验证，但不创建或修改任何输出文件：
+
+```bash
+extb ./extension --dry-run
+```
+
+即使同时指定 `--zip`，dry-run 也只显示计划生成的 ZIP 路径，不会创建归档。已有输出目录不会被替换或清理。
+
+查看最终依赖闭包中的文件列表：
+
+```bash
+extb ./extension --dry-run --list-files
+```
+
+`--list-files` 也可以用于真实构建，并且只列出进入扩展包的相对路径，不包含 ZIP 本身。
+使用 `--json` 时，结果中的 `includedFiles` 始终包含同一份文件列表，无需额外指定 `--list-files`。
+
+成功时不输出任何终端信息：
+
+```bash
+extb ./extension --quiet
+```
+
+quiet 不会隐藏错误，失败时仍返回非零退出码并输出错误信息。为避免含义冲突，`--quiet` 不能和 `--json`、`--list-files` 同时使用。
 
 ## CLI 与配置文件对应关系
 
@@ -305,6 +374,7 @@ extb ./extension --no-config
 | `--zip` | `zip.enabled: true` | 生成 ZIP |
 | `--no-zip` | `zip.enabled: false` | 不生成 ZIP |
 | `--zip-name <name>` | `zip.fileName` | CLI 中同时启用 ZIP 并设置文件名 |
+| `--dry-run` | `BuildOptions.dryRun: true` | 完整预演，但不写入输出目录或 ZIP |
 
 ### 仅属于 CLI 或加载上下文的参数
 
@@ -313,6 +383,10 @@ extb ./extension --no-config
 | `-c, --config <file>` | `BuildOptions.configFile` | 指定配置文件 |
 | `--no-config` | `BuildOptions.configFile: false` | 禁用配置文件加载 |
 | `--json` | 无配置字段 | 只改变构建结果的终端输出格式 |
+| `--list-files` | 无配置字段 | 输出最终依赖闭包中的文件列表 |
+| `--quiet` | 无配置字段 | 隐藏成功输出，错误不受影响 |
+| `--defaults` | 无配置字段 | 显示内置默认配置并退出，不加载项目配置或启动构建 |
+| `--show-config` | 无配置字段 | 显示默认值、配置文件和 CLI 参数合并后的最终配置并退出 |
 | `-v, --version` | 无配置字段 | 显示包版本 |
 | `-h, --help` | 无配置字段 | 显示帮助 |
 
@@ -425,6 +499,21 @@ console.log(result.outDir);
 console.log(result.zipPath); // ZIP 未启用时为 undefined
 console.log(result.files);
 console.log(resolved.minify);
+```
+
+预演构建同样可以通过 API 使用：
+
+```ts
+const preview = await build({
+  root: './extension',
+  zip: true,
+  dryRun: true,
+});
+
+console.log(preview.dryRun);         // true
+console.log(preview.includedFiles);  // 最终包内相对路径
+console.log(preview.plannedZipPath); // 计划路径，文件不会实际生成
+console.log(preview.zipPath);        // undefined
 ```
 
 公开 API：
