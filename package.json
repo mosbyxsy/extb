@@ -1,6 +1,6 @@
 {
   "name": "@mosbydev/extb",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "description": "A dependency-aware minifier, obfuscator, transpiler and packager for browser extensions.",
   "type": "module",
   "license": "MIT",

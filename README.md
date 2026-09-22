@@ -176,6 +176,20 @@ extb ./extension \
 
 ## 压缩与混淆等级
 
+需要把压缩和混淆设置为相同等级时，可以使用聚合参数：
+
+```bash
+extb ./extension --optimize aggressive
+```
+
+它等价于 `--minify aggressive --obfuscate aggressive`。裸 `--optimize` 使用 `safe`，`--no-optimize` 同时把两者设置为 `none`。聚合参数总是先应用，随后再应用具体选项，因此可以安全覆盖，并且与参数书写顺序无关：
+
+```bash
+extb ./extension --optimize aggressive --obfuscate safe --no-minify-css
+```
+
+上例最终为 HTML/JS 压缩 `aggressive`、CSS 压缩 `none`、JS 混淆 `safe`。注意 `--optimize safe` 会开启安全混淆，而项目默认配置仍然是“安全压缩、关闭混淆”。
+
 HTML、JavaScript 和 CSS 可以统一设置，也可以分别覆盖：
 
 ```bash
@@ -300,6 +314,8 @@ Arguments:
   --zip-name <name>      自定义并生成 ZIP（文件名必须以 .zip 结尾）
 
 代码处理选项：
+  --optimize [level]      同时设置压缩和混淆等级（省略：safe）
+  --no-optimize           同时禁用压缩和混淆，等价于 --optimize=none
   --minify [level]       设置全部压缩等级：none、safe、aggressive（省略：safe）
   --no-minify            禁用全部压缩，等价于 --minify=none
   --minify-html [level]  设置 HTML 压缩等级（省略：safe）
@@ -326,7 +342,7 @@ Arguments:
 
 ```
 
-`root` 默认为当前目录。CLI 路径相对当前工作目录；显式 CLI 参数优先于配置文件。裸 `--minify*` 和 `--obfuscate` 使用 `safe` 等级；`--target es5` 启用转译，`--target modern` 保持现代语法并覆盖配置文件中的 ES5 转译。
+`root` 默认为当前目录。CLI 路径相对当前工作目录；显式 CLI 参数优先于配置文件。裸 `--optimize`、`--minify*` 和 `--obfuscate` 使用 `safe` 等级；`--target es5` 启用转译，`--target modern` 保持现代语法并覆盖配置文件中的 ES5 转译。
 
 在 CI 中可以只输出机器可读的 `BuildResult`：
 
@@ -357,7 +373,7 @@ extb ./extension --dry-run --list-files
 ```
 
 `--list-files` 也可以用于真实构建，并且只列出进入扩展包的相对路径，不包含 ZIP 本身。
-使用 `--json` 时，结果中的 `includedFiles` 始终包含同一份文件列表，无需额外指定 `--list-files`。
+使用 `--json` 时，结果中的 `includedFiles` 始终包含同一份文件列表，无需额外指定 `--list-files`；两者同时使用会报参数冲突。
 
 成功时不输出任何终端信息：
 
@@ -379,6 +395,8 @@ quiet 不会隐藏错误，失败时仍返回非零退出码并输出错误信�
 | `--include <glob>` | `include[]` | 强制加入静态分析无法发现的资源 |
 | `--exclude <glob>` | `exclude[]` | 从扩展包中完全排除资源 |
 | `--no-transform <glob>` | `transformExclude[]` | 文件仍打包，但跳过全部文本转换 |
+| `--optimize [level]` | `minify.level` + `obfuscate.level` | 同时设置压缩和混淆等级，省略等级时为 `safe` |
+| `--no-optimize` | 两个 `level` 均为 `'none'` | 同时关闭压缩和混淆 |
 | `--minify [level]` | `minify.level` | 设置全部压缩等级，省略等级时为 `safe` |
 | `--no-minify` | `minify.level: 'none'` | 关闭全部压缩 |
 | `--minify-html [level]` | `minify.html` | 设置 HTML 压缩等级 |
@@ -439,10 +457,10 @@ defineConfig({
 内置默认值 < 配置文件 < CLI 参数或 build() 参数
 ```
 
-- `include`、`exclude`、`transformExclude` 会在不同配置层之间累加。
+- 所有规则数组都会在不同配置层之间累加并去重，包括 `include`、`exclude`、`transformExclude` 以及三个处理器各自的 `exclude`。
 - `minify.level` 先统一设置三个资源类型，再由同一层的 `html`、`js`、`css` 分项覆盖。
 - `obfuscate.reservedNames` 与 `--keep-name` 会累加并去重。
-- `minify.exclude`、`obfuscate.exclude`、`transpile.exclude` 分别控制对应处理器。
+- `minify.exclude`、`obfuscate.exclude`、`transpile.exclude` 分别控制对应处理器，并与 `transformExclude` 合并。
 - CLI 路径相对当前工作目录；配置文件路径相对配置文件所在目录。
 - 所有 glob 都相对 `manifest.json` 所在目录，并使用 POSIX `/` 分隔符。
 
@@ -550,6 +568,7 @@ defineConfig(config: ExtbConfig): ExtbConfig
 
 - `--obfuscate aggressive` 可能改写跨文件共享的全局变量、函数名、类名以及 `Function.name`。使用 `obfuscate.reservedNames` 保留公开名称，或通过 `obfuscate.exclude` 排除依赖反射、`eval` 和源码字符串的文件。
 - `--minify-js aggressive` 会执行深度压缩，即使没有混淆也可能内联或删除可证明无用的声明。
+- `onclick` 等 HTML 事件属性最多只做文本压缩，不执行混淆或 ES5 转译。
 - `--minify-css aggressive` 启用 CleanCSS Level 2，可能合并规则和重组选择器；复杂样式应进行页面回归测试。
 - 对象属性名不会被混淆，Terser 的 `unsafe` 优化保持关闭。
 - ES5 转译不会自动注入 `Promise`、`Map`、`Set` 等运行时 polyfill。

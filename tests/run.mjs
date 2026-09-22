@@ -400,6 +400,44 @@ test('loads TypeScript config and applies programmatic overrides', async () => {
   });
 });
 
+test('accumulates and deduplicates rule arrays across configuration layers', async () => {
+  await withTemporaryDirectory(async (root) => {
+    await write(
+      root,
+      'extb.config.json',
+      JSON.stringify({
+        include: ['shared/**', 'config-only/**'],
+        exclude: ['shared.tmp', 'config.tmp'],
+        transformExclude: ['vendor/**'],
+        minify: { exclude: ['generated/**'] },
+        obfuscate: { exclude: ['vendor/**'], reservedNames: ['publicApi'] },
+        transpile: { exclude: ['legacy/**'] },
+      }),
+    );
+    const loaded = await loadConfig({
+      cwd: root,
+      overrides: {
+        include: ['shared/**', 'cli-only/**'],
+        exclude: ['shared.tmp', 'cli.tmp'],
+        transformExclude: ['vendor/**', 'raw/**'],
+        minify: { exclude: ['generated/**', 'raw-js/**'] },
+        obfuscate: { exclude: ['third-party/**'], reservedNames: ['publicApi', 'externalApi'] },
+        transpile: { exclude: ['legacy/**', 'modern-only/**'] },
+      },
+    });
+
+    assert.deepEqual(loaded.include, ['shared/**', 'config-only/**', 'cli-only/**']);
+    assert.equal(loaded.exclude.filter((value) => value === 'shared.tmp').length, 1);
+    assert.ok(loaded.exclude.includes('config.tmp'));
+    assert.ok(loaded.exclude.includes('cli.tmp'));
+    assert.deepEqual(loaded.transformExclude, ['vendor/**', 'raw/**']);
+    assert.deepEqual(loaded.minify.exclude, ['generated/**', 'raw-js/**', 'vendor/**', 'raw/**']);
+    assert.deepEqual(loaded.obfuscate.exclude, ['vendor/**', 'third-party/**', 'raw/**']);
+    assert.deepEqual(loaded.obfuscate.reservedNames, ['publicApi', 'externalApi']);
+    assert.deepEqual(loaded.transpile.exclude, ['legacy/**', 'modern-only/**', 'vendor/**', 'raw/**']);
+  });
+});
+
 test('obfuscates local identifiers while preserving behavior and public names', async () => {
   await withTemporaryDirectory(async (root) => {
     await createExtension(path.join(root, 'extension'));
@@ -758,6 +796,21 @@ test('parses optional processing levels without consuming the positional root', 
 
   await assert.rejects(
     () =>
+      runCli([process.execPath, 'extb', '--optimize', 'extension'], {
+        commandName: 'extb',
+        build: async (options) => {
+          receivedOptions = options;
+          throw new Error('停止测试构建');
+        },
+      }),
+    /停止测试构建/,
+  );
+  assert.equal(receivedOptions.root, 'extension');
+  assert.deepEqual(receivedOptions.minify, { level: 'safe' });
+  assert.deepEqual(receivedOptions.obfuscate, { level: 'safe' });
+
+  await assert.rejects(
+    () =>
       runCli(
         [
           process.execPath,
@@ -785,7 +838,51 @@ test('parses optional processing levels without consuming the positional root', 
   assert.deepEqual(receivedOptions.obfuscate, { level: 'aggressive' });
 
   await assert.rejects(
+    () =>
+      runCli(
+        [
+          process.execPath,
+          'extb',
+          'extension',
+          '--obfuscate',
+          'safe',
+          '--no-minify-css',
+          '--optimize',
+          'aggressive',
+        ],
+        {
+          commandName: 'extb',
+          build: async (options) => {
+            receivedOptions = options;
+            throw new Error('停止测试构建');
+          },
+        },
+      ),
+    /停止测试构建/,
+  );
+  assert.deepEqual(receivedOptions.minify, { level: 'aggressive', css: 'none' });
+  assert.deepEqual(receivedOptions.obfuscate, { level: 'safe' });
+
+  await assert.rejects(
+    () =>
+      runCli([process.execPath, 'extb', 'extension', '--no-optimize'], {
+        commandName: 'extb',
+        build: async (options) => {
+          receivedOptions = options;
+          throw new Error('停止测试构建');
+        },
+      }),
+    /停止测试构建/,
+  );
+  assert.deepEqual(receivedOptions.minify, { level: 'none' });
+  assert.deepEqual(receivedOptions.obfuscate, { level: 'none' });
+
+  await assert.rejects(
     () => runCli([process.execPath, 'extb', 'extension', '--minify=invalid']),
+    /只能是 'none'、'safe' 或 'aggressive'/,
+  );
+  await assert.rejects(
+    () => runCli([process.execPath, 'extb', 'extension', '--optimize=invalid']),
     /只能是 'none'、'safe' 或 'aggressive'/,
   );
 });
@@ -885,6 +982,7 @@ test('rejects contradictory CLI flags before starting a build', async () => {
   };
   const conflicts = [
     ['--config', 'extb.config.ts', '--no-config'],
+    ['--optimize', 'safe', '--no-optimize'],
     ['--minify', 'safe', '--no-minify'],
     ['--minify-html', 'safe', '--no-minify-html'],
     ['--minify-js', 'aggressive', '--no-minify-js'],
@@ -893,6 +991,7 @@ test('rejects contradictory CLI flags before starting a build', async () => {
     ['--zip-name', 'release.zip', '--no-zip'],
     ['--quiet', '--json'],
     ['--quiet', '--list-files'],
+    ['--json', '--list-files'],
     ['--defaults', '--show-config'],
   ];
   for (const flags of conflicts) {
@@ -1033,6 +1132,7 @@ test('supports short and long command names with help and version flags', async 
   assert.match(stdout, /--list-files/);
   assert.match(stdout, /--quiet/);
   assert.match(stdout, /--minify \[level\]/);
+  assert.match(stdout, /--optimize \[level\]/);
   assert.match(stdout, /--minify-html \[level\]/);
   assert.match(stdout, /--minify-js \[level\]/);
   assert.match(stdout, /--minify-css \[level\]/);

@@ -22,6 +22,7 @@ interface CliOptions {
   config?: string | false;
   manifest?: string;
   outDir?: string;
+  optimize?: CompressionLevel | false;
   minify?: CompressionLevel | false;
   minifyHtml?: CompressionLevel | false;
   minifyJs?: CompressionLevel | false;
@@ -46,6 +47,7 @@ const packageMetadata = createRequire(import.meta.url)('../package.json') as { v
 const COMPRESSION_LEVELS = new Set<CompressionLevel>(['none', 'safe', 'aggressive']);
 const OBFUSCATION_LEVELS = new Set<ObfuscationLevel>(['none', 'safe', 'aggressive']);
 const OPTIONAL_LEVEL_FLAGS = new Map<string, ReadonlySet<string>>([
+  ['--optimize', COMPRESSION_LEVELS],
   ['--minify', COMPRESSION_LEVELS],
   ['--minify-html', COMPRESSION_LEVELS],
   ['--minify-js', COMPRESSION_LEVELS],
@@ -151,6 +153,7 @@ function hasLongOption(args: readonly string[], name: string): boolean {
  */
 function validateCliArguments(args: readonly string[]): void {
   const conflicts: Array<[string, string]> = [
+    ['--optimize', '--no-optimize'],
     ['--minify', '--no-minify'],
     ['--minify-html', '--no-minify-html'],
     ['--minify-js', '--no-minify-js'],
@@ -159,6 +162,7 @@ function validateCliArguments(args: readonly string[]): void {
     ['--defaults', '--show-config'],
     ['--quiet', '--json'],
     ['--quiet', '--list-files'],
+    ['--json', '--list-files'],
     ['--zip-name', '--no-zip'],
   ];
   for (const [positive, negative] of conflicts) {
@@ -213,9 +217,18 @@ export function createBuildOptions(
     result.transformExclude = options.transform;
   }
 
+  // 聚合等级先展开到压缩和混淆，再应用具体选项；因此覆盖结果不受 argv 书写顺序影响。
+  const hasOptimize = hasLongOption(args, '--optimize') || hasLongOption(args, '--no-optimize');
+  const optimizeLevel: CompressionLevel | undefined = hasOptimize
+    ? options.optimize === false
+      ? 'none'
+      : options.optimize ?? 'safe'
+    : undefined;
+
   // 必须检查原始参数是否显式出现，因为 Commander 会为正负选项生成布尔默认值。
   const minify: MinifyOptions = {};
-  let hasMinify = false;
+  let hasMinify = optimizeLevel !== undefined;
+  if (optimizeLevel !== undefined) minify.level = optimizeLevel;
   if (hasLongOption(args, '--minify') || hasLongOption(args, '--no-minify')) {
     minify.level = options.minify === false ? 'none' : options.minify ?? 'safe';
     hasMinify = true;
@@ -239,8 +252,9 @@ export function createBuildOptions(
   if (hasMinify) result.minify = minify;
 
   const hasObfuscate = hasLongOption(args, '--obfuscate') || hasLongOption(args, '--no-obfuscate');
-  if (hasObfuscate || (options.keepName !== undefined && options.keepName.length > 0)) {
+  if (hasOptimize || hasObfuscate || (options.keepName !== undefined && options.keepName.length > 0)) {
     const obfuscate: ObfuscateOptions = {};
+    if (optimizeLevel !== undefined) obfuscate.level = optimizeLevel;
     if (hasObfuscate) {
       obfuscate.level = options.obfuscate === false ? 'none' : options.obfuscate ?? 'safe';
     }
@@ -301,6 +315,8 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
     .option('--no-zip', '不生成 ZIP，用于覆盖配置文件')
     .option('--zip-name <name>', '自定义并生成 ZIP（文件名必须以 .zip 结尾）')
     .optionsGroup('代码处理选项：')
+    .option('--optimize [level]', '同时设置压缩和混淆等级（省略：safe）', parseCompressionLevel)
+    .option('--no-optimize', '同时禁用压缩和混淆，等价于 --optimize=none')
     .option('--minify [level]', '设置全部压缩等级：none、safe、aggressive（省略：safe）', parseCompressionLevel)
     .option('--no-minify', '禁用全部压缩，等价于 --minify=none')
     .option('--minify-html [level]', '设置 HTML 压缩等级（省略：safe）', parseCompressionLevel)

@@ -164,10 +164,15 @@ function resolveConfigPaths(config: ExtbConfig, baseDir: string): ExtbConfig {
 /** 在归一化边界验证字符串数组，尽早给出包含字段名的可读错误。 */
 function stringArray(value: unknown, label: string): string[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
-    throw new ExtbError(`${label} 必须是字符串数组。`);
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.trim() === '')) {
+    throw new ExtbError(`${label} 必须是非空字符串数组。`);
   }
   return [...value];
+}
+
+/** 跨配置层累加规则数组并去重；靠前层的顺序保持不变，便于最终配置稳定输出。 */
+function mergeRules(...layers: string[][]): string[] {
+  return [...new Set(layers.flat())];
 }
 
 /** 验证压缩等级；配置文件是运行时输入，不能只依赖 TypeScript 类型。 */
@@ -222,11 +227,14 @@ function applyMinify(
     html,
     js,
     css,
-    exclude: input.exclude === undefined ? current.exclude : stringArray(input.exclude, 'minify.exclude'),
+    exclude:
+      input.exclude === undefined
+        ? current.exclude
+        : mergeRules(current.exclude, stringArray(input.exclude, 'minify.exclude')),
   };
 }
 
-/** 应用混淆配置；数组采用高优先级层替换，而不是与低优先级层隐式合并。 */
+/** 应用混淆配置；规则数组跨层累加并去重，与顶层 include/exclude 保持一致。 */
 function applyObfuscate(
   current: ResolvedObfuscateOptions,
   input: ObfuscationLevel | ObfuscateOptions | undefined,
@@ -239,7 +247,10 @@ function applyObfuscate(
   }
   return {
     level: input.level === undefined ? current.level : obfuscationLevel(input.level, 'obfuscate.level'),
-    exclude: input.exclude === undefined ? current.exclude : stringArray(input.exclude, 'obfuscate.exclude'),
+    exclude:
+      input.exclude === undefined
+        ? current.exclude
+        : mergeRules(current.exclude, stringArray(input.exclude, 'obfuscate.exclude')),
     reservedNames:
       input.reservedNames === undefined
         ? current.reservedNames
@@ -273,7 +284,10 @@ function applyTranspile(
   }
   return {
     target: input.target ?? current.target,
-    exclude: input.exclude === undefined ? current.exclude : stringArray(input.exclude, 'transpile.exclude'),
+    exclude:
+      input.exclude === undefined
+        ? current.exclude
+        : mergeRules(current.exclude, stringArray(input.exclude, 'transpile.exclude')),
   };
 }
 
@@ -311,21 +325,21 @@ function mergeConfig(
   const root = overrides.root ?? fileConfig.root ?? discoveryRoot;
   const manifest = overrides.manifest ?? fileConfig.manifest;
   const outDir = overrides.outDir ?? fileConfig.outDir ?? path.join(root, 'dist');
-  const exclude = [
-    ...DEFAULT_EXCLUDES,
-    ...stringArray(fileConfig.exclude, 'exclude'),
-    ...stringArray(overrides.exclude, 'exclude'),
-  ];
+  const exclude = mergeRules(
+    [...DEFAULT_EXCLUDES],
+    stringArray(fileConfig.exclude, 'exclude'),
+    stringArray(overrides.exclude, 'exclude'),
+  );
   // include 与 exclude 都采用累加语义；exclude 在文件清单阶段先执行，因此冲突时排除优先。
-  const include = [
-    ...stringArray(fileConfig.include, 'include'),
-    ...stringArray(overrides.include, 'include'),
-  ];
+  const include = mergeRules(
+    stringArray(fileConfig.include, 'include'),
+    stringArray(overrides.include, 'include'),
+  );
   // transformExclude 与顶层 include/exclude 一样采用累加语义，适合 CLI 临时追加 vendor 文件。
-  const transformExclude = [
-    ...stringArray(fileConfig.transformExclude, 'transformExclude'),
-    ...stringArray(overrides.transformExclude, 'transformExclude'),
-  ];
+  const transformExclude = mergeRules(
+    stringArray(fileConfig.transformExclude, 'transformExclude'),
+    stringArray(overrides.transformExclude, 'transformExclude'),
+  );
 
   // 压缩默认使用安全等级。每应用一层，都保留该层没有声明的旧值。
   let minify: ResolvedMinifyOptions = { level: 'safe', html: 'safe', js: 'safe', css: 'safe', exclude: [] };
@@ -343,9 +357,9 @@ function mergeConfig(
   transpile = applyTranspile(transpile, overrides.transpile);
 
   // 通用转换排除规则最终注入三个处理器；资源仍进入包，只是保持原始文本内容。
-  minify.exclude = [...new Set([...minify.exclude, ...transformExclude])];
-  obfuscate.exclude = [...new Set([...obfuscate.exclude, ...transformExclude])];
-  transpile.exclude = [...new Set([...transpile.exclude, ...transformExclude])];
+  minify.exclude = mergeRules(minify.exclude, transformExclude);
+  obfuscate.exclude = mergeRules(obfuscate.exclude, transformExclude);
+  transpile.exclude = mergeRules(transpile.exclude, transformExclude);
 
   // ZIP 默认关闭；普通构建只输出可直接加载的目录，需要归档时再显式启用。
   let zip: ResolvedZipOptions = { enabled: false };
