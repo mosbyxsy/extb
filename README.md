@@ -10,7 +10,7 @@
 - [默认配置](#默认配置)
 - [查看默认配置](#查看默认配置)
 - [查看最终配置](#查看最终配置)
-- [JavaScript 处理](#javascript-处理)
+- [压缩与混淆等级](#压缩与混淆等级)
 - [文件收集规则](#文件收集规则)
 - [CLI](#cli)
 - [构建预演与输出控制](#构建预演与输出控制)
@@ -27,7 +27,8 @@
 - 只打包 manifest 入口及其递归依赖，不复制 `.git`、`.idea`、源码备注等无关文件。
 - 追踪 HTML 资源、CSS `url()`/`@import`、ES modules、Worker、`importScripts()`、`runtime.getURL()`、DNR 规则和 Web Accessible Resources。
 - 默认安全压缩 HTML、CSS 和 JavaScript，不改变文件名、目录结构及资源 URL。
-- 可选使用 Terser 深度压缩并混淆顶层标识符。
+- HTML、CSS、JavaScript 分别支持 `none`、`safe`、`aggressive` 三级压缩。
+- JavaScript 压缩与标识符混淆独立配置，混淆同样支持三级强度。
 - 可选使用 Babel 将箭头函数、class、可选链等 ES6+ 语法降级到 ES5。
 - 在同级临时目录完成构建；失败时保留原有输出。
 - 支持零写入构建预演、依赖文件清单和静默模式。
@@ -115,22 +116,20 @@ defineConfig({
   transformExclude: [],
 
   minify: {
-    enabled: true,
-    html: true,
-    js: true,
-    css: true,
+    level: 'safe',
+    html: 'safe',
+    js: 'safe',
+    css: 'safe',
     exclude: [],
   },
 
   obfuscate: {
-    enabled: false,
-    mode: 'safe',
+    level: 'none',
     exclude: [],
     reservedNames: [],
   },
 
   transpile: {
-    enabled: false,
     target: 'modern',
     exclude: [],
   },
@@ -175,30 +174,54 @@ extb ./extension \
 
 输出是经过补全和归一化的 JSON，路径字段为实际使用的绝对路径。该选项会加载配置文件并应用 CLI 覆盖，但不会查找或读取 `manifest.json`，也不会执行构建或写入输出目录。配置优先级仍为“内置默认值 < 配置文件 < CLI 参数”。
 
-## JavaScript 处理
+## 压缩与混淆等级
 
-默认模式只移除普通注释和多余格式，不改写标识符，也不执行可能改变副作用顺序的激进优化：
-
-```bash
-extb ./extension
-```
-
-保守混淆只重命名局部标识符：
+HTML、JavaScript 和 CSS 可以统一设置，也可以分别覆盖：
 
 ```bash
-extb ./extension --obfuscate
+extb ./extension --minify aggressive --minify-html safe --no-minify-css
 ```
 
-深度压缩会执行多轮 Terser 优化，并混淆局部及顶层标识符：
+配置采用固定的“总等级先应用，分项等级随后覆盖”规则。上面的最终结果为 HTML `safe`、JavaScript `aggressive`、CSS `none`。
+
+| 等级 | HTML | JavaScript | CSS |
+| --- | --- | --- | --- |
+| `none` | 不压缩 | 不压缩 | 不压缩 |
+| `safe` | 保守折叠空白、删除普通注释 | 删除普通注释和多余格式，不执行 `compress` | CleanCSS Level 1 |
+| `aggressive` | 额外清理属性引号、冗余类型属性等 | 三轮 Terser `compress`，保持 `unsafe: false` | CleanCSS Level 1 + Level 2 |
+
+裸开关的等级为 `safe`：
 
 ```bash
-extb ./extension --aggressive-js
+extb ./extension --minify
 ```
+
+`--no-minify` 和各分项 `--no-minify-*` 等价于对应等级 `none`。当等级参数写在 root 前面时，推荐使用等号形式消除阅读歧义：
+
+```bash
+extb --minify=aggressive ./extension
+```
+
+JavaScript 混淆与压缩完全独立：
+
+```bash
+# 只做深度压缩，不改写标识符
+extb ./extension --minify-js aggressive --no-obfuscate
+
+# 保守压缩，但允许顶层标识符改名
+extb ./extension --minify-js safe --obfuscate aggressive
+```
+
+混淆等级含义：
+
+- `none`：不混淆，是默认值。
+- `safe`：只重命名局部标识符，保留顶层、函数和类名称。
+- `aggressive`：允许改写顶层变量、函数名、类名和 `Function.name`。
 
 代码通过字符串、反射或外部接口使用某个名称时，可以重复使用 `--keep-name`：
 
 ```bash
-extb ./extension --aggressive-js \
+extb ./extension --obfuscate aggressive \
   --keep-name publicApi \
   --keep-name messageHandler
 ```
@@ -212,7 +235,7 @@ extb ./extension --target es5
 组合使用深度压缩、混淆和 ES5 输出：
 
 ```bash
-extb ./extension --aggressive-js --target es5
+extb ./extension --minify-js aggressive --obfuscate aggressive --target es5
 ```
 
 ## 文件收集规则
@@ -277,17 +300,16 @@ Arguments:
   --zip-name <name>      自定义并生成 ZIP（文件名必须以 .zip 结尾）
 
 代码处理选项：
-  --minify               启用 HTML、JavaScript 和 CSS 压缩（默认：启用）
-  --no-minify            禁用 HTML、JavaScript 和 CSS 压缩
-  --minify-html          启用 HTML 压缩（默认：启用）
+  --minify [level]       设置全部压缩等级：none、safe、aggressive（省略：safe）
+  --no-minify            禁用全部压缩，等价于 --minify=none
+  --minify-html [level]  设置 HTML 压缩等级（省略：safe）
   --no-minify-html       禁用 HTML 压缩
-  --minify-js            启用 JavaScript 压缩（默认：启用）
+  --minify-js [level]    设置 JavaScript 压缩等级（省略：safe）
   --no-minify-js         禁用 JavaScript 压缩
-  --minify-css           启用 CSS 压缩（默认：启用）
+  --minify-css [level]   设置 CSS 压缩等级（省略：safe）
   --no-minify-css        禁用 CSS 压缩
-  --obfuscate            启用保守的 JavaScript 局部标识符混淆（默认：关闭）
-  --no-obfuscate         禁用 JavaScript 混淆，用于覆盖配置文件
-  --aggressive-js        启用完整 JS 压缩和顶层标识符混淆（可能需要保留名称）
+  --obfuscate [level]    设置 JS 混淆等级：none、safe、aggressive（省略：safe；默认：none）
+  --no-obfuscate         禁用 JavaScript 混淆，等价于 --obfuscate=none
   --target <target>      JavaScript 输出目标：modern 或 es5（默认：modern）
   --keep-name <name>     混淆时保留标识符名称，可重复使用
 
@@ -304,7 +326,7 @@ Arguments:
 
 ```
 
-`root` 默认为当前目录。CLI 路径相对当前工作目录；显式 CLI 参数优先于配置文件。`--target es5` 启用转译，`--target modern` 保持现代语法并覆盖配置文件中的 ES5 转译。
+`root` 默认为当前目录。CLI 路径相对当前工作目录；显式 CLI 参数优先于配置文件。裸 `--minify*` 和 `--obfuscate` 使用 `safe` 等级；`--target es5` 启用转译，`--target modern` 保持现代语法并覆盖配置文件中的 ES5 转译。
 
 在 CI 中可以只输出机器可读的 `BuildResult`：
 
@@ -357,20 +379,19 @@ quiet 不会隐藏错误，失败时仍返回非零退出码并输出错误信�
 | `--include <glob>` | `include[]` | 强制加入静态分析无法发现的资源 |
 | `--exclude <glob>` | `exclude[]` | 从扩展包中完全排除资源 |
 | `--no-transform <glob>` | `transformExclude[]` | 文件仍打包，但跳过全部文本转换 |
-| `--minify` | `minify.enabled: true` | 开启全部压缩 |
-| `--no-minify` | `minify.enabled: false` | 关闭全部压缩 |
-| `--minify-html` | `minify.html: true` | 开启 HTML 压缩 |
-| `--no-minify-html` | `minify.html: false` | 关闭 HTML 压缩 |
-| `--minify-js` | `minify.js: true` | 开启 JavaScript 压缩 |
-| `--no-minify-js` | `minify.js: false` | 关闭 JavaScript 压缩 |
-| `--minify-css` | `minify.css: true` | 开启 CSS 压缩 |
-| `--no-minify-css` | `minify.css: false` | 关闭 CSS 压缩 |
-| `--obfuscate` | `obfuscate.enabled: true`、`mode: 'safe'` | 开启保守混淆 |
-| `--no-obfuscate` | `obfuscate.enabled: false` | 关闭混淆 |
-| `--aggressive-js` | `obfuscate.enabled: true`、`mode: 'aggressive'` | 深度压缩和顶层混淆 |
+| `--minify [level]` | `minify.level` | 设置全部压缩等级，省略等级时为 `safe` |
+| `--no-minify` | `minify.level: 'none'` | 关闭全部压缩 |
+| `--minify-html [level]` | `minify.html` | 设置 HTML 压缩等级 |
+| `--no-minify-html` | `minify.html: 'none'` | 关闭 HTML 压缩 |
+| `--minify-js [level]` | `minify.js` | 设置 JavaScript 压缩等级 |
+| `--no-minify-js` | `minify.js: 'none'` | 关闭 JavaScript 压缩 |
+| `--minify-css [level]` | `minify.css` | 设置 CSS 压缩等级 |
+| `--no-minify-css` | `minify.css: 'none'` | 关闭 CSS 压缩 |
+| `--obfuscate [level]` | `obfuscate.level` | 设置混淆等级，省略等级时为 `safe` |
+| `--no-obfuscate` | `obfuscate.level: 'none'` | 关闭混淆 |
 | `--keep-name <name>` | `obfuscate.reservedNames[]` | 保留指定标识符，可重复使用 |
-| `--target es5` | `transpile.enabled: true`、`target: 'es5'` | 转译到 ES5 |
-| `--target modern` | `transpile.enabled: false`、`target: 'modern'` | 保持现代语法 |
+| `--target es5` | `transpile.target: 'es5'` | 启用转译并输出 ES5 语法 |
+| `--target modern` | `transpile.target: 'modern'` | 不执行语法降级，保持现代语法 |
 | `--zip` | `zip.enabled: true` | 生成 ZIP |
 | `--no-zip` | `zip.enabled: false` | 不生成 ZIP |
 | `--zip-name <name>` | `zip.fileName` | CLI 中同时启用 ZIP 并设置文件名 |
@@ -419,6 +440,7 @@ defineConfig({
 ```
 
 - `include`、`exclude`、`transformExclude` 会在不同配置层之间累加。
+- `minify.level` 先统一设置三个资源类型，再由同一层的 `html`、`js`、`css` 分项覆盖。
 - `obfuscate.reservedNames` 与 `--keep-name` 会累加并去重。
 - `minify.exclude`、`obfuscate.exclude`、`transpile.exclude` 分别控制对应处理器。
 - CLI 路径相对当前工作目录；配置文件路径相对配置文件所在目录。
@@ -451,22 +473,20 @@ export default defineConfig({
   transformExclude: ['vendor/**'],
 
   minify: {
-    enabled: true,
-    html: true,
-    js: true,
-    css: true,
+    level: 'safe',
+    html: 'safe',
+    js: 'aggressive',
+    css: 'safe',
     exclude: ['vendor/**'],
   },
 
   obfuscate: {
-    enabled: true,
-    mode: 'safe', // 可改为 aggressive
+    level: 'safe', // none、safe 或 aggressive
     exclude: ['vendor/**'],
     reservedNames: ['publicApiName'],
   },
 
   transpile: {
-    enabled: true,
     target: 'es5',
     exclude: ['vendor/modern-only.js'],
   },
@@ -481,6 +501,8 @@ export default defineConfig({
 
 配置文件内的路径相对配置文件目录。发现多个配置文件时会报错，可使用 `--config` 明确指定。
 
+压缩和混淆只接受等级字符串；布尔值、`minify.enabled`、`obfuscate.enabled` 和 `obfuscate.mode` 不再支持。关闭时请显式使用 `level: 'none'`。转译由 `target` 单独决定，`transpile.enabled` 也不再支持：`modern` 表示不降级，`es5` 表示启用转译。
+
 ## Node.js API
 
 ```ts
@@ -489,7 +511,7 @@ import { build, defineConfig, loadConfig } from '@mosbydev/extb';
 const config = defineConfig({
   root: './extension',
   outDir: './release',
-  transpile: { enabled: true, target: 'es5' },
+  transpile: { target: 'es5' },
 });
 
 const resolved = await loadConfig({ overrides: config });
@@ -526,7 +548,9 @@ defineConfig(config: ExtbConfig): ExtbConfig
 
 ## 兼容性说明
 
-- `--aggressive-js` 可能改写跨文件共享的全局变量、函数名、类名以及 `Function.name`。使用 `obfuscate.reservedNames` 保留公开名称，或通过 `obfuscate.exclude` 排除依赖反射、`eval` 和源码字符串的文件。
+- `--obfuscate aggressive` 可能改写跨文件共享的全局变量、函数名、类名以及 `Function.name`。使用 `obfuscate.reservedNames` 保留公开名称，或通过 `obfuscate.exclude` 排除依赖反射、`eval` 和源码字符串的文件。
+- `--minify-js aggressive` 会执行深度压缩，即使没有混淆也可能内联或删除可证明无用的声明。
+- `--minify-css aggressive` 启用 CleanCSS Level 2，可能合并规则和重组选择器；复杂样式应进行页面回归测试。
 - 对象属性名不会被混淆，Terser 的 `unsafe` 优化保持关闭。
 - ES5 转译不会自动注入 `Promise`、`Map`、`Set` 等运行时 polyfill。
 - 为保持浏览器原生模块路径和加载方式，`import`/`export` 不会转成 CommonJS；模块内部的现代语法仍会降级。

@@ -1,26 +1,27 @@
+/** 压缩强度。none 不处理，safe 保守压缩，aggressive 允许更深入的结构优化。 */
+export type CompressionLevel = 'none' | 'safe' | 'aggressive';
+
+/** JavaScript 标识符混淆强度。none 关闭，safe 仅局部，aggressive 允许顶层改名。 */
+export type ObfuscationLevel = 'none' | 'safe' | 'aggressive';
+
 /** HTML、JavaScript、CSS 三类文本资源的压缩配置。 */
 export interface MinifyOptions {
-  /** 总开关。设置后先统一覆盖三个分项，随后再应用下面的分项值。 */
-  enabled?: boolean;
-  /** 是否压缩 HTML 文档本身。 */
-  html?: boolean;
-  /** 是否压缩独立 JS 文件以及 HTML 中的可执行脚本。 */
-  js?: boolean;
-  /** 是否压缩独立 CSS 文件以及 HTML 中的内联样式。 */
-  css?: boolean;
+  /** 总等级。设置后先统一覆盖三个分项，随后再应用下面的分项等级。 */
+  level?: CompressionLevel;
+  /** HTML 文档本身的压缩等级。 */
+  html?: CompressionLevel;
+  /** 独立 JS 文件以及 HTML 中可执行脚本的压缩等级。 */
+  js?: CompressionLevel;
+  /** 独立 CSS 文件以及 HTML 中内联样式的压缩等级。 */
+  css?: CompressionLevel;
   /** 不参与压缩的 POSIX 风格 glob，匹配路径相对 manifest 所在目录。 */
   exclude?: string[];
 }
 
-/** JavaScript 混淆强度。aggressive 会额外启用完整压缩和顶层标识符改名。 */
-export type ObfuscateMode = 'safe' | 'aggressive';
-
 /** JavaScript 混淆配置。混淆默认关闭。 */
 export interface ObfuscateOptions {
-  /** 是否启用混淆。 */
-  enabled?: boolean;
-  /** safe 只改局部名称；aggressive 还会压缩代码并改写顶层名称。 */
-  mode?: ObfuscateMode;
+  /** none 关闭；safe 只改局部名称；aggressive 还允许改写顶层、函数和类名称。 */
+  level?: ObfuscationLevel;
   /** 不参与混淆的相对路径 glob。 */
   exclude?: string[];
   /** 即使开启混淆也必须保留的标识符名称。 */
@@ -32,9 +33,7 @@ export type JavaScriptTarget = 'modern' | 'es5';
 
 /** ES6+ 到旧版 JavaScript 的转译配置。 */
 export interface TranspileOptions {
-  /** 是否启用转译；默认关闭。 */
-  enabled?: boolean;
-  /** 输出语法目标；当前支持 modern 和 es5。 */
+  /** 输出语法目标；modern 保持源码语法，es5 启用 Babel 降级。 */
   target?: JavaScriptTarget;
   /** 不参与语法转译的相对路径 glob。 */
   exclude?: string[];
@@ -66,12 +65,12 @@ export interface ExtbConfig {
   include?: string[];
   /** 文件仍会打包，但跳过 HTML/CSS/JS 压缩、混淆和语法转译。 */
   transformExclude?: string[];
-  /** 布尔值是总开关，对象形式可分别控制三类文件。 */
-  minify?: boolean | MinifyOptions;
-  /** 布尔值是总开关，对象形式可设置排除项和保留名称。 */
-  obfuscate?: boolean | ObfuscateOptions;
-  /** JavaScript 语法转译；设为 true 等价于 `{ enabled: true, target: 'es5' }`。 */
-  transpile?: boolean | TranspileOptions;
+  /** 字符串设置总等级，对象形式可分别控制三类文件。 */
+  minify?: CompressionLevel | MinifyOptions;
+  /** 字符串设置混淆等级，对象形式可设置排除项和保留名称。 */
+  obfuscate?: ObfuscationLevel | ObfuscateOptions;
+  /** JavaScript 语法转译；字符串直接设置目标，对象形式可追加排除规则。 */
+  transpile?: JavaScriptTarget | TranspileOptions;
   /** 布尔值是总开关，对象形式可自定义 ZIP 名称。 */
   zip?: boolean | ZipOptions;
 }
@@ -98,26 +97,24 @@ export interface LoadConfigOptions {
   overrides?: ExtbConfig;
 }
 
-/** 归一化后的压缩配置，所有开关和数组都已经补全。 */
+/** 归一化后的压缩配置，所有等级和数组都已经补全。 */
 export interface ResolvedMinifyOptions {
-  enabled: boolean;
-  html: boolean;
-  js: boolean;
-  css: boolean;
+  level: CompressionLevel;
+  html: CompressionLevel;
+  js: CompressionLevel;
+  css: CompressionLevel;
   exclude: string[];
 }
 
 /** 归一化后的混淆配置。 */
 export interface ResolvedObfuscateOptions {
-  enabled: boolean;
-  mode: ObfuscateMode;
+  level: ObfuscationLevel;
   exclude: string[];
   reservedNames: string[];
 }
 
 /** 归一化后的 JavaScript 转译配置。 */
 export interface ResolvedTranspileOptions {
-  enabled: boolean;
   target: JavaScriptTarget;
   exclude: string[];
 }

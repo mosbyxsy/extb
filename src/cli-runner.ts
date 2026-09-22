@@ -6,8 +6,10 @@ import { ExtbError } from './errors.js';
 import type {
   BuildOptions,
   BuildResult,
+  CompressionLevel,
   JavaScriptTarget,
   MinifyOptions,
+  ObfuscationLevel,
   ObfuscateOptions,
   TranspileOptions,
   ZipOptions,
@@ -20,12 +22,11 @@ interface CliOptions {
   config?: string | false;
   manifest?: string;
   outDir?: string;
-  minify?: boolean;
-  minifyHtml?: boolean;
-  minifyJs?: boolean;
-  minifyCss?: boolean;
-  obfuscate?: boolean;
-  aggressiveJs?: boolean;
+  minify?: CompressionLevel | false;
+  minifyHtml?: CompressionLevel | false;
+  minifyJs?: CompressionLevel | false;
+  minifyCss?: CompressionLevel | false;
+  obfuscate?: ObfuscationLevel | false;
   target?: JavaScriptTarget;
   zip?: boolean;
   zipName?: string;
@@ -42,6 +43,15 @@ interface CliOptions {
 
 /** package.json 是版本号的唯一来源，避免发布时忘记同步 CLI 中的硬编码值。 */
 const packageMetadata = createRequire(import.meta.url)('../package.json') as { version: string };
+const COMPRESSION_LEVELS = new Set<CompressionLevel>(['none', 'safe', 'aggressive']);
+const OBFUSCATION_LEVELS = new Set<ObfuscationLevel>(['none', 'safe', 'aggressive']);
+const OPTIONAL_LEVEL_FLAGS = new Map<string, ReadonlySet<string>>([
+  ['--minify', COMPRESSION_LEVELS],
+  ['--minify-html', COMPRESSION_LEVELS],
+  ['--minify-js', COMPRESSION_LEVELS],
+  ['--minify-css', COMPRESSION_LEVELS],
+  ['--obfuscate', OBFUSCATION_LEVELS],
+]);
 
 /**
  * 读取真实归一化默认值，再把机器相关的绝对路径替换成适合阅读和复制的相对路径。
@@ -66,8 +76,8 @@ async function createDefaultConfigSnapshot(): Promise<Record<string, unknown>> {
  * 使用与 build() 相同的拆分方式解析最终配置，但停在配置归一化阶段。
  * dryRun 是一次构建的执行模式而非 ExtbConfig 字段，因此不传入配置合并器。
  */
-async function resolveFinalCliConfig(root: string | undefined, options: CliOptions) {
-  const { cwd, configFile, dryRun: _dryRun, ...overrides } = createBuildOptions(root, options);
+async function resolveFinalCliConfig(root: string | undefined, options: CliOptions, args: readonly string[]) {
+  const { cwd, configFile, dryRun: _dryRun, ...overrides } = createBuildOptions(root, options, args);
   return loadConfig({
     ...(cwd === undefined ? {} : { cwd }),
     ...(configFile === undefined ? {} : { configFile }),
@@ -92,6 +102,42 @@ function collectNonEmpty(value: string, previous: unknown): string[] {
   return [...(Array.isArray(previous) ? (previous as string[]) : []), value];
 }
 
+/** 在 Commander 解析边界校验压缩等级，错误会自动关联到对应 CLI 参数。 */
+function parseCompressionLevel(value: string): CompressionLevel {
+  if (!COMPRESSION_LEVELS.has(value as CompressionLevel)) {
+    throw new InvalidArgumentError("只能是 'none'、'safe' 或 'aggressive'");
+  }
+  return value as CompressionLevel;
+}
+
+/** 混淆与压缩统一采用三级等级，none 与 --no-obfuscate 等价。 */
+function parseObfuscationLevel(value: string): ObfuscationLevel {
+  if (!OBFUSCATION_LEVELS.has(value as ObfuscationLevel)) {
+    throw new InvalidArgumentError("只能是 'none'、'safe' 或 'aggressive'");
+  }
+  return value as ObfuscationLevel;
+}
+
+/**
+ * Commander 会把可选参数后的源码目录误当作 level。这里只在下一个参数确实是合法等级时
+ * 让它被消费；否则把裸开关改写为 `=safe`，保留下一个参数作为 root。
+ */
+export function normalizeOptionalLevels(argv: readonly string[]): string[] {
+  const normalized = [...argv];
+  for (let index = 2; index < normalized.length; index += 1) {
+    const argument = normalized[index]!;
+    const levels = OPTIONAL_LEVEL_FLAGS.get(argument);
+    if (levels === undefined) continue;
+    const next = normalized[index + 1];
+    if (next !== undefined && levels.has(next)) {
+      index += 1;
+      continue;
+    }
+    normalized[index] = `${argument}=safe`;
+  }
+  return normalized;
+}
+
 /** 判断 argv 中是否显式出现长选项，同时兼容 `--name=value` 写法。 */
 function hasLongOption(args: readonly string[], name: string): boolean {
   return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
@@ -104,29 +150,27 @@ function hasLongOption(args: readonly string[], name: string): boolean {
  * 调用 build() 前直接失败。校验放在 action 内，确保 `--help` 始终可以正常显示。
  */
 function validateCliArguments(args: readonly string[]): void {
-  if (hasLongOption(args, '--defaults') && hasLongOption(args, '--show-config')) {
-    throw new ExtbError('参数 --defaults 与 --show-config 不能同时使用。');
+  const conflicts: Array<[string, string]> = [
+    ['--minify', '--no-minify'],
+    ['--minify-html', '--no-minify-html'],
+    ['--minify-js', '--no-minify-js'],
+    ['--minify-css', '--no-minify-css'],
+    ['--obfuscate', '--no-obfuscate'],
+    ['--defaults', '--show-config'],
+    ['--quiet', '--json'],
+    ['--quiet', '--list-files'],
+    ['--zip-name', '--no-zip'],
+  ];
+  for (const [positive, negative] of conflicts) {
+    if (hasLongOption(args, positive) && hasLongOption(args, negative)) {
+      throw new ExtbError(`参数 ${positive} 与 ${negative} 不能同时使用。`);
+    }
   }
   const hasConfig =
     hasLongOption(args, '--config') ||
     args.some((arg) => arg === '-c' || (arg.startsWith('-c') && !arg.startsWith('--') && arg.length > 2));
   if (hasConfig && hasLongOption(args, '--no-config')) {
     throw new ExtbError('参数 --config 与 --no-config 不能同时使用。');
-  }
-  if (hasLongOption(args, '--aggressive-js') && hasLongOption(args, '--no-obfuscate')) {
-    throw new ExtbError('参数 --aggressive-js 与 --no-obfuscate 不能同时使用。');
-  }
-  if (hasLongOption(args, '--aggressive-js') && hasLongOption(args, '--no-minify-js')) {
-    throw new ExtbError('参数 --aggressive-js 与 --no-minify-js 不能同时使用。');
-  }
-  if (hasLongOption(args, '--zip-name') && hasLongOption(args, '--no-zip')) {
-    throw new ExtbError('参数 --zip-name 与 --no-zip 不能同时使用。');
-  }
-  if (hasLongOption(args, '--quiet') && hasLongOption(args, '--json')) {
-    throw new ExtbError('参数 --quiet 与 --json 不能同时使用。');
-  }
-  if (hasLongOption(args, '--quiet') && hasLongOption(args, '--list-files')) {
-    throw new ExtbError('参数 --quiet 与 --list-files 不能同时使用。');
   }
 }
 
@@ -149,9 +193,14 @@ function formatBytes(bytes: number): string {
  * 将 CLI 的扁平选项转换成 BuildOptions。
  *
  * 只写入用户明确提供的值非常重要：undefined 必须继续保持“未指定”，才能让配置文件
- * 或内置默认值生效。正负开关由 Commander 汇总成同一个 boolean 字段。
+ * 或内置默认值生效。带等级的正向选项与对应 --no-* 会被 Commander 汇总到同一字段，
+ * 因此还要检查原始 argv 才能区分“未指定”和显式覆盖。
  */
-export function createBuildOptions(root: string | undefined, options: CliOptions): BuildOptions {
+export function createBuildOptions(
+  root: string | undefined,
+  options: CliOptions,
+  args: readonly string[],
+): BuildOptions {
   const result: BuildOptions = {};
   if (root !== undefined) result.root = root;
   if (options.config !== undefined) result.configFile = options.config;
@@ -164,36 +213,36 @@ export function createBuildOptions(root: string | undefined, options: CliOptions
     result.transformExclude = options.transform;
   }
 
-  if (
-    options.minify !== undefined ||
-    options.minifyHtml !== undefined ||
-    options.minifyJs !== undefined ||
-    options.minifyCss !== undefined
-  ) {
-    // 分项开关组合为一个对象，随后由配置层按总开关 -> 分项覆盖的顺序归一化。
-    const minify: MinifyOptions = {};
-    if (options.minify !== undefined) minify.enabled = options.minify;
-    if (options.minifyHtml !== undefined) minify.html = options.minifyHtml;
-    if (options.minifyJs !== undefined) minify.js = options.minifyJs;
-    if (options.minifyCss !== undefined) minify.css = options.minifyCss;
-    result.minify = minify;
+  // 必须检查原始参数是否显式出现，因为 Commander 会为正负选项生成布尔默认值。
+  const minify: MinifyOptions = {};
+  let hasMinify = false;
+  if (hasLongOption(args, '--minify') || hasLongOption(args, '--no-minify')) {
+    minify.level = options.minify === false ? 'none' : options.minify ?? 'safe';
+    hasMinify = true;
   }
-
-  if (
-    options.obfuscate !== undefined ||
-    options.aggressiveJs !== undefined ||
-    (options.keepName !== undefined && options.keepName.length > 0)
-  ) {
-    const obfuscate: ObfuscateOptions = {};
-    if (options.obfuscate !== undefined) {
-      obfuscate.enabled = options.obfuscate;
-      // --obfuscate 明确表示安全模式，避免配置文件中的 aggressive 模式被意外沿用。
-      if (options.obfuscate) obfuscate.mode = 'safe';
+  const minifyFields: Array<[
+    keyof Pick<MinifyOptions, 'html' | 'js' | 'css'>,
+    CompressionLevel | false | undefined,
+    string,
+    string,
+  ]> = [
+    ['html', options.minifyHtml, '--minify-html', '--no-minify-html'],
+    ['js', options.minifyJs, '--minify-js', '--no-minify-js'],
+    ['css', options.minifyCss, '--minify-css', '--no-minify-css'],
+  ];
+  for (const [field, value, positive, negative] of minifyFields) {
+    if (hasLongOption(args, positive) || hasLongOption(args, negative)) {
+      minify[field] = value === false ? 'none' : value ?? 'safe';
+      hasMinify = true;
     }
-    if (options.aggressiveJs === true) {
-      obfuscate.mode = 'aggressive';
-      // --no-obfuscate 明确出现时优先，否则 aggressive-js 自身即表示启用。
-      if (options.obfuscate === undefined) obfuscate.enabled = true;
+  }
+  if (hasMinify) result.minify = minify;
+
+  const hasObfuscate = hasLongOption(args, '--obfuscate') || hasLongOption(args, '--no-obfuscate');
+  if (hasObfuscate || (options.keepName !== undefined && options.keepName.length > 0)) {
+    const obfuscate: ObfuscateOptions = {};
+    if (hasObfuscate) {
+      obfuscate.level = options.obfuscate === false ? 'none' : options.obfuscate ?? 'safe';
     }
     if (options.keepName !== undefined && options.keepName.length > 0) {
       obfuscate.reservedNames = options.keepName;
@@ -201,10 +250,7 @@ export function createBuildOptions(root: string | undefined, options: CliOptions
     result.obfuscate = obfuscate;
   }
   if (options.target !== undefined) {
-    const transpile: TranspileOptions = {
-      enabled: options.target === 'es5',
-      target: options.target,
-    };
+    const transpile: TranspileOptions = { target: options.target };
     result.transpile = transpile;
   }
   if (options.zip !== undefined || options.zipName !== undefined) {
@@ -227,6 +273,8 @@ export function createBuildOptions(root: string | undefined, options: CliOptions
  * Node 模式，格式与 process.argv 相同：前两项是 node 路径和脚本路径。
  */
 export async function runCli(argv: readonly string[], dependencies: CliDependencies = {}): Promise<void> {
+  const normalizedArgv = normalizeOptionalLevels(argv);
+  const args = normalizedArgv.slice(2);
   const buildExtension = dependencies.build ?? build;
   const write = dependencies.write ?? ((text: string) => process.stdout.write(text));
 
@@ -253,17 +301,16 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
     .option('--no-zip', '不生成 ZIP，用于覆盖配置文件')
     .option('--zip-name <name>', '自定义并生成 ZIP（文件名必须以 .zip 结尾）')
     .optionsGroup('代码处理选项：')
-    .option('--minify', '启用 HTML、JavaScript 和 CSS 压缩（默认：启用）')
-    .option('--no-minify', '禁用 HTML、JavaScript 和 CSS 压缩')
-    .option('--minify-html', '启用 HTML 压缩（默认：启用）')
+    .option('--minify [level]', '设置全部压缩等级：none、safe、aggressive（省略：safe）', parseCompressionLevel)
+    .option('--no-minify', '禁用全部压缩，等价于 --minify=none')
+    .option('--minify-html [level]', '设置 HTML 压缩等级（省略：safe）', parseCompressionLevel)
     .option('--no-minify-html', '禁用 HTML 压缩')
-    .option('--minify-js', '启用 JavaScript 压缩（默认：启用）')
+    .option('--minify-js [level]', '设置 JavaScript 压缩等级（省略：safe）', parseCompressionLevel)
     .option('--no-minify-js', '禁用 JavaScript 压缩')
-    .option('--minify-css', '启用 CSS 压缩（默认：启用）')
+    .option('--minify-css [level]', '设置 CSS 压缩等级（省略：safe）', parseCompressionLevel)
     .option('--no-minify-css', '禁用 CSS 压缩')
-    .option('--obfuscate', '启用保守的 JavaScript 局部标识符混淆（默认：关闭）')
-    .option('--no-obfuscate', '禁用 JavaScript 混淆，用于覆盖配置文件')
-    .option('--aggressive-js', '启用完整 JS 压缩和顶层标识符混淆（可能需要保留名称）')
+    .option('--obfuscate [level]', '设置 JS 混淆等级：none、safe、aggressive（省略：safe；默认：none）', parseObfuscationLevel)
+    .option('--no-obfuscate', '禁用 JavaScript 混淆，等价于 --obfuscate=none')
     .option('--target <target>', 'JavaScript 输出目标：modern 或 es5（默认：modern）', parseJavaScriptTarget)
     .option('--keep-name <name>', '混淆时保留标识符名称，可重复使用', collectNonEmpty)
     .optionsGroup('资源选择选项：')
@@ -278,7 +325,7 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
     .allowExcessArguments(false);
 
   program.action(async (root: string | undefined, rawOptions: CliOptions) => {
-    validateCliArguments(argv.slice(2));
+    validateCliArguments(args);
     // 与 --help/--version 一样，--defaults 是终止型信息选项，不进入项目配置或构建流程。
     if (rawOptions.defaults) {
       write(`${JSON.stringify(await createDefaultConfigSnapshot(), null, 2)}\n`);
@@ -286,10 +333,10 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
     }
     // 最终配置会加载配置文件并应用 CLI 覆盖，但不会继续查找 manifest 或执行构建。
     if (rawOptions.showConfig) {
-      write(`${JSON.stringify(await resolveFinalCliConfig(root, rawOptions), null, 2)}\n`);
+      write(`${JSON.stringify(await resolveFinalCliConfig(root, rawOptions, args), null, 2)}\n`);
       return;
     }
-    const result = await buildExtension(createBuildOptions(root, rawOptions));
+    const result = await buildExtension(createBuildOptions(root, rawOptions, args));
     if (rawOptions.quiet) return;
     if (rawOptions.json) {
       write(`${JSON.stringify(result, null, 2)}\n`);
@@ -315,7 +362,7 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
   });
 
   try {
-    await program.parseAsync([...argv], { from: 'node' });
+    await program.parseAsync(normalizedArgv, { from: 'node' });
   } catch (error) {
     // --help 和 --version 已经完成输出，属于正常结束；其他参数错误继续交给 bin 入口处理。
     if (

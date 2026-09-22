@@ -3,9 +3,12 @@ import path from 'node:path';
 import { createJiti } from 'jiti';
 import { ExtbError, asErrorMessage } from './errors.js';
 import type {
+  CompressionLevel,
   ExtbConfig,
+  JavaScriptTarget,
   LoadConfigOptions,
   MinifyOptions,
+  ObfuscationLevel,
   ObfuscateOptions,
   ResolvedConfig,
   ResolvedMinifyOptions,
@@ -167,28 +170,55 @@ function stringArray(value: unknown, label: string): string[] {
   return [...value];
 }
 
+/** 验证压缩等级；配置文件是运行时输入，不能只依赖 TypeScript 类型。 */
+function compressionLevel(value: unknown, label: string): CompressionLevel {
+  if (value !== 'none' && value !== 'safe' && value !== 'aggressive') {
+    throw new ExtbError(`${label} 只能是 'none'、'safe' 或 'aggressive'。`);
+  }
+  return value;
+}
+
+/** 混淆使用相同的三级强度，但保留独立类型以表达不同业务含义。 */
+function obfuscationLevel(value: unknown, label: string): ObfuscationLevel {
+  if (value !== 'none' && value !== 'safe' && value !== 'aggressive') {
+    throw new ExtbError(`${label} 只能是 'none'、'safe' 或 'aggressive'。`);
+  }
+  return value;
+}
+
 /**
  * 把一层 minify 配置应用到已有状态。
  *
- * 布尔值或 enabled 会先统一设置 HTML/JS/CSS，随后同一对象内的分项值覆盖总开关。
- * 因此 `{ enabled: false, js: true }` 可以表达“只压缩 JavaScript”。
+ * 字符串或 level 会先统一设置 HTML/JS/CSS，随后同一对象内的分项等级覆盖总等级。
+ * 因此 `{ level: 'none', js: 'aggressive' }` 可以表达“只深度压缩 JavaScript”。
  */
-function applyMinify(current: ResolvedMinifyOptions, input: boolean | MinifyOptions | undefined): ResolvedMinifyOptions {
+function applyMinify(
+  current: ResolvedMinifyOptions,
+  input: CompressionLevel | MinifyOptions | undefined,
+): ResolvedMinifyOptions {
   if (input === undefined) return current;
-  if (typeof input === 'boolean') {
-    return { ...current, enabled: input, html: input, js: input, css: input };
+  if (typeof input === 'string') {
+    const level = compressionLevel(input, 'minify');
+    return { ...current, level, html: level, js: level, css: level };
   }
-  if (!isPlainObject(input)) throw new ExtbError('minify 必须是布尔值或对象。');
+  if (!isPlainObject(input)) throw new ExtbError('minify 必须是压缩等级或对象。');
+  if ('enabled' in input) {
+    throw new ExtbError("minify.enabled 已移除，请使用 minify.level: 'none' | 'safe' | 'aggressive'。");
+  }
 
+  let level = current.level;
   let html = current.html;
   let js = current.js;
   let css = current.css;
-  if (input.enabled !== undefined) html = js = css = Boolean(input.enabled);
-  if (input.html !== undefined) html = Boolean(input.html);
-  if (input.js !== undefined) js = Boolean(input.js);
-  if (input.css !== undefined) css = Boolean(input.css);
+  if (input.level !== undefined) {
+    level = compressionLevel(input.level, 'minify.level');
+    html = js = css = level;
+  }
+  if (input.html !== undefined) html = compressionLevel(input.html, 'minify.html');
+  if (input.js !== undefined) js = compressionLevel(input.js, 'minify.js');
+  if (input.css !== undefined) css = compressionLevel(input.css, 'minify.css');
   return {
-    enabled: html || js || css,
+    level,
     html,
     js,
     css,
@@ -199,17 +229,16 @@ function applyMinify(current: ResolvedMinifyOptions, input: boolean | MinifyOpti
 /** 应用混淆配置；数组采用高优先级层替换，而不是与低优先级层隐式合并。 */
 function applyObfuscate(
   current: ResolvedObfuscateOptions,
-  input: boolean | ObfuscateOptions | undefined,
+  input: ObfuscationLevel | ObfuscateOptions | undefined,
 ): ResolvedObfuscateOptions {
   if (input === undefined) return current;
-  if (typeof input === 'boolean') return { ...current, enabled: input };
-  if (!isPlainObject(input)) throw new ExtbError('obfuscate 必须是布尔值或对象。');
-  if (input.mode !== undefined && input.mode !== 'safe' && input.mode !== 'aggressive') {
-    throw new ExtbError("obfuscate.mode 只能是 'safe' 或 'aggressive'。");
+  if (typeof input === 'string') return { ...current, level: obfuscationLevel(input, 'obfuscate') };
+  if (!isPlainObject(input)) throw new ExtbError('obfuscate 必须是混淆等级或对象。');
+  if ('enabled' in input || 'mode' in input) {
+    throw new ExtbError("obfuscate.enabled/mode 已移除，请使用 obfuscate.level: 'none' | 'safe' | 'aggressive'。");
   }
   return {
-    enabled: input.enabled === undefined ? current.enabled : Boolean(input.enabled),
-    mode: input.mode === undefined ? current.mode : input.mode,
+    level: input.level === undefined ? current.level : obfuscationLevel(input.level, 'obfuscate.level'),
     exclude: input.exclude === undefined ? current.exclude : stringArray(input.exclude, 'obfuscate.exclude'),
     reservedNames:
       input.reservedNames === undefined
@@ -223,24 +252,27 @@ function applyObfuscate(
   };
 }
 
-/** 应用 JavaScript 转译配置；指定 es5 目标时若没有显式开关，会自动启用转译。 */
+/** 应用 JavaScript 转译配置；target 是唯一状态源，es5 启用降级，modern 保持源码语法。 */
 function applyTranspile(
   current: ResolvedTranspileOptions,
-  input: boolean | TranspileOptions | undefined,
+  input: JavaScriptTarget | TranspileOptions | undefined,
 ): ResolvedTranspileOptions {
   if (input === undefined) return current;
-  if (typeof input === 'boolean') {
-    return { ...current, enabled: input, target: input ? 'es5' : current.target };
+  if (typeof input === 'string') {
+    if (input !== 'modern' && input !== 'es5') {
+      throw new ExtbError("transpile 只能是 'modern'、'es5' 或对象。");
+    }
+    return { ...current, target: input };
   }
-  if (!isPlainObject(input)) throw new ExtbError('transpile 必须是布尔值或对象。');
+  if (!isPlainObject(input)) throw new ExtbError("transpile 必须是 'modern'、'es5' 或对象。");
+  if ('enabled' in input) {
+    throw new ExtbError("transpile.enabled 已移除，请使用 transpile.target: 'modern' | 'es5'。");
+  }
   if (input.target !== undefined && input.target !== 'modern' && input.target !== 'es5') {
     throw new ExtbError("transpile.target 只能是 'modern' 或 'es5'。");
   }
-  const target = input.target ?? current.target;
-  const enabled = input.enabled === undefined ? (input.target === undefined ? current.enabled : target === 'es5') : Boolean(input.enabled);
   return {
-    enabled,
-    target,
+    target: input.target ?? current.target,
     exclude: input.exclude === undefined ? current.exclude : stringArray(input.exclude, 'transpile.exclude'),
   };
 }
@@ -295,18 +327,18 @@ function mergeConfig(
     ...stringArray(overrides.transformExclude, 'transformExclude'),
   ];
 
-  // 压缩默认全部开启。每应用一层，都保留该层没有声明的旧值。
-  let minify: ResolvedMinifyOptions = { enabled: true, html: true, js: true, css: true, exclude: [] };
+  // 压缩默认使用安全等级。每应用一层，都保留该层没有声明的旧值。
+  let minify: ResolvedMinifyOptions = { level: 'safe', html: 'safe', js: 'safe', css: 'safe', exclude: [] };
   minify = applyMinify(minify, fileConfig.minify);
   minify = applyMinify(minify, overrides.minify);
 
   // 混淆默认关闭，以免依赖反射、eval 或函数名称的第三方代码发生行为变化。
-  let obfuscate: ResolvedObfuscateOptions = { enabled: false, mode: 'safe', exclude: [], reservedNames: [] };
+  let obfuscate: ResolvedObfuscateOptions = { level: 'none', exclude: [], reservedNames: [] };
   obfuscate = applyObfuscate(obfuscate, fileConfig.obfuscate);
   obfuscate = applyObfuscate(obfuscate, overrides.obfuscate);
 
-  // 语法转译默认关闭；只有显式指定 transpile 或 es5 目标时才改变源代码语法级别。
-  let transpile: ResolvedTranspileOptions = { enabled: false, target: 'modern', exclude: [] };
+  // modern 是不降级的默认目标；只有最终目标为 es5 时处理器才调用 Babel。
+  let transpile: ResolvedTranspileOptions = { target: 'modern', exclude: [] };
   transpile = applyTranspile(transpile, fileConfig.transpile);
   transpile = applyTranspile(transpile, overrides.transpile);
 

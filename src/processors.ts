@@ -6,7 +6,7 @@ import { minify as minifyHtml } from 'html-minifier-terser';
 import { minify as minifyJavaScript } from 'terser';
 import { ExtbError } from './errors.js';
 import { matchesAny } from './paths.js';
-import type { ResolvedConfig } from './types.js';
+import type { CompressionLevel, ObfuscationLevel, ResolvedConfig } from './types.js';
 
 /** 用于构建摘要的处理类别；copied 表示没有经过文本转换。 */
 export type ProcessedKind = 'copied' | 'html' | 'js' | 'css';
@@ -19,20 +19,19 @@ export interface ProcessedText {
   transpiled: boolean;
 }
 
-/** 判断当前文件是否被 minify.exclude 排除。 */
-function canMinify(relativePath: string, config: ResolvedConfig): boolean {
-  return !matchesAny(relativePath, config.minify.exclude);
+/** 命中 minify.exclude 时强制返回 none，否则返回该资源类型配置的实际等级。 */
+function levelFor(relativePath: string, level: CompressionLevel, config: ResolvedConfig): CompressionLevel {
+  return matchesAny(relativePath, config.minify.exclude) ? 'none' : level;
 }
 
-/** 混淆既要求总开关开启，也要求当前相对路径没有命中排除 glob。 */
-function canObfuscate(relativePath: string, config: ResolvedConfig): boolean {
-  return config.obfuscate.enabled && !matchesAny(relativePath, config.obfuscate.exclude);
+/** 命中排除规则时关闭混淆，否则返回配置的混淆等级。 */
+function obfuscationLevelFor(relativePath: string, config: ResolvedConfig): ObfuscationLevel {
+  return matchesAny(relativePath, config.obfuscate.exclude) ? 'none' : config.obfuscate.level;
 }
 
-/** 转译需要开启总开关、选择 es5 目标，并且当前文件没有命中排除规则。 */
+/** es5 目标本身即表示启用转译，同时当前文件不能命中排除规则。 */
 function canTranspile(relativePath: string, config: ResolvedConfig): boolean {
   return (
-    config.transpile.enabled &&
     config.transpile.target === 'es5' &&
     !matchesAny(relativePath, config.transpile.exclude)
   );
@@ -74,40 +73,41 @@ async function transpileJavaScriptToEs5(source: string): Promise<string> {
 /**
  * 使用 Terser 对一个完整脚本或 HTML 内脚本片段进行转换。
  *
- * safe 模式刻意关闭 compress：只依赖紧凑输出移除空白和普通注释，不执行常量折叠、
- * 无用代码删除等优化。aggressive 模式会执行三轮完整压缩，并允许顶层标识符改名。
- *
- * 开启 obfuscate 时也只改局部标识符：不改属性、顶层变量、函数名和类名。这样可以保留
- * 不同扩展脚本之间通过全局名称通信的行为，并降低 Function.name 相关兼容风险。
+ * safe 压缩只依赖紧凑输出移除空白和普通注释；aggressive 压缩执行三轮 compress，
+ * 但仍关闭 unsafe。混淆等级与压缩等级相互独立：safe 只改局部标识符，aggressive
+ * 才允许顶层标识符以及函数、类名称被改写；任何等级都不混淆对象属性。
  */
 async function transformJavaScript(
   source: string,
-  minify: boolean,
-  obfuscate: boolean,
-  aggressive: boolean,
+  minifyLevel: CompressionLevel,
+  obfuscationLevel: ObfuscationLevel,
   transpile: boolean,
   reservedNames: string[],
   inline: boolean,
 ) {
-  if (!minify && !obfuscate && !transpile) return source;
+  if (minifyLevel === 'none' && obfuscationLevel === 'none' && !transpile) return source;
+  const aggressiveCompression = minifyLevel === 'aggressive';
+  const aggressiveObfuscation = obfuscationLevel === 'aggressive';
   // 事件属性包含顶层 return，不能作为完整 Program 交给 Babel；独立脚本和 script 标签可转译。
   const input = transpile && !inline ? await transpileJavaScriptToEs5(source) : source;
+  // 只转译时直接返回 Babel 输出，避免 `minify: none` 仍被 Terser 紧凑格式化。
+  if (minifyLevel === 'none' && obfuscationLevel === 'none') return input;
   const result = await minifyJavaScript(input, {
-    // aggressive 仍关闭 unsafe 系列优化，避免擅自假设内建对象或 getter 没有副作用。
-    compress: aggressive ? { passes: 3, unsafe: false } : false,
+    // aggressive 压缩仍关闭 unsafe 系列优化，避免擅自假设内建对象或 getter 没有副作用。
+    compress: aggressiveCompression ? { passes: 3, unsafe: false } : false,
     ecma: transpile ? 5 : 2020,
-    mangle: obfuscate
+    mangle: obfuscationLevel !== 'none'
       ? {
           eval: false,
-          keep_classnames: !aggressive,
-          keep_fnames: !aggressive,
+          keep_classnames: !aggressiveObfuscation,
+          keep_fnames: !aggressiveObfuscation,
           properties: false,
           reserved: reservedNames,
-          toplevel: aggressive,
+          toplevel: aggressiveObfuscation,
         }
       : false,
-    keep_classnames: !aggressive,
-    keep_fnames: !aggressive,
+    keep_classnames: !aggressiveObfuscation,
+    keep_fnames: !aggressiveObfuscation,
     // onclick 等事件属性允许顶层 return，Terser 需要 bare_returns 才能解析这类片段。
     parse: inline ? { bare_returns: true } : {},
     format: {
@@ -122,15 +122,20 @@ async function transformJavaScript(
 }
 
 /**
- * 使用 clean-css 的 level 1 单属性优化。
- * 禁止 @import 内联和 URL 重写，确保所有 CSS 引用仍指向原来的相对资源路径。
+ * 根据等级生成 CleanCSS 选项。safe 只启用 level 1；aggressive 额外启用 level 2
+ * 规则合并和结构优化。所有等级都禁止 @import 内联和 URL 重写。
  */
-function transformCss(source: string): string {
-  const result = new CleanCSS({
+function cleanCssOptions(level: CompressionLevel): CleanCSS.OptionsOutput {
+  return {
     inline: ['none'],
-    level: 1,
+    level: level === 'aggressive' ? { 1: {}, 2: {} } : 1,
     rebase: false,
-  }).minify(source);
+  };
+}
+
+function transformCss(source: string, level: CompressionLevel): string {
+  if (level === 'none') return source;
+  const result = new CleanCSS(cleanCssOptions(level)).minify(source);
   if (result.errors.length > 0) throw new ExtbError(`CSS 压缩失败: ${result.errors.join('; ')}`);
   return result.styles;
 }
@@ -138,40 +143,38 @@ function transformCss(source: string): string {
 /**
  * HTML 是复合资源：除了压缩标签和空白，还可能包含 script、style 和事件属性。
  * 因此即使 HTML 本身压缩关闭，只要 JS/CSS/混淆任一项开启，仍需让 HTML 解析器处理
- * 对应的内联片段；其余会改变标签结构的激进选项全部保持关闭。
+ * 对应的内联片段。只有 HTML aggressive 才开启属性级清理，可选标签删除始终关闭。
  */
 async function transformHtml(source: string, relativePath: string, config: ResolvedConfig): Promise<string> {
-  const minifyAllowed = canMinify(relativePath, config);
-  const html = config.minify.html && minifyAllowed;
-  const js = config.minify.js && minifyAllowed;
-  const css = config.minify.css && minifyAllowed;
-  const obfuscate = canObfuscate(relativePath, config);
+  const htmlLevel = levelFor(relativePath, config.minify.html, config);
+  const jsLevel = levelFor(relativePath, config.minify.js, config);
+  const cssLevel = levelFor(relativePath, config.minify.css, config);
+  const obfuscationLevel = obfuscationLevelFor(relativePath, config);
   const transpile = canTranspile(relativePath, config);
-  const aggressive = obfuscate && config.obfuscate.mode === 'aggressive';
-  if (!html && !js && !css && !obfuscate && !transpile) return source;
+  const aggressiveHtml = htmlLevel === 'aggressive';
+  if (
+    htmlLevel === 'none' &&
+    jsLevel === 'none' &&
+    cssLevel === 'none' &&
+    obfuscationLevel === 'none' &&
+    !transpile
+  ) return source;
 
   return minifyHtml(source, {
     // conservativeCollapse 会保留一个必要空格，降低内联元素文字粘连风险。
-    collapseWhitespace: html,
-    conservativeCollapse: true,
+    collapseWhitespace: htmlLevel !== 'none',
+    conservativeCollapse: !aggressiveHtml,
     continueOnParseError: false,
     keepClosingSlash: true,
-    minifyCSS: css
-      ? {
-          inline: ['none'],
-          level: 1,
-          rebase: false,
-        }
-      : false,
+    minifyCSS: cssLevel === 'none' ? false : cleanCssOptions(cssLevel),
     minifyJS:
-      js || obfuscate || transpile
+      jsLevel !== 'none' || obfuscationLevel !== 'none' || transpile
         ? async (text: string, inline: boolean) =>
-            // 事件属性是上下文相关的代码片段，因此只压缩、不做局部名称混淆。
+            // 事件属性是上下文相关的代码片段，因此允许压缩和转译，但不做标识符混淆。
             transformJavaScript(
               text,
-              js,
-              obfuscate && !inline,
-              aggressive && !inline,
+              jsLevel,
+              inline ? 'none' : obfuscationLevel,
               transpile,
               config.obfuscate.reservedNames,
               inline,
@@ -180,16 +183,16 @@ async function transformHtml(source: string, relativePath: string, config: Resol
     preserveLineBreaks: false,
     preventAttributesEscaping: false,
     processConditionalComments: false,
-    removeAttributeQuotes: false,
-    removeComments: html,
+    removeAttributeQuotes: aggressiveHtml,
+    removeComments: htmlLevel !== 'none',
     removeEmptyAttributes: false,
     removeOptionalTags: false,
-    removeRedundantAttributes: false,
-    removeScriptTypeAttributes: false,
-    removeStyleLinkTypeAttributes: false,
+    removeRedundantAttributes: aggressiveHtml,
+    removeScriptTypeAttributes: aggressiveHtml,
+    removeStyleLinkTypeAttributes: aggressiveHtml,
     sortAttributes: false,
     sortClassName: false,
-    useShortDoctype: false,
+    useShortDoctype: aggressiveHtml,
   });
 }
 
@@ -205,45 +208,45 @@ export async function processTextFile(
   config: ResolvedConfig,
 ): Promise<ProcessedText> {
   const extension = path.posix.extname(relativePath).toLowerCase();
-  const minifyAllowed = canMinify(relativePath, config);
-  const obfuscate = canObfuscate(relativePath, config);
+  const obfuscationLevel = obfuscationLevelFor(relativePath, config);
 
   if (extension === '.html' || extension === '.htm') {
-    const active = (config.minify.html || config.minify.js || config.minify.css) && minifyAllowed;
+    const active =
+      levelFor(relativePath, config.minify.html, config) !== 'none' ||
+      levelFor(relativePath, config.minify.js, config) !== 'none' ||
+      levelFor(relativePath, config.minify.css, config) !== 'none';
     const transpile = canTranspile(relativePath, config);
     return {
       content: await transformHtml(source, relativePath, config),
-      kind: active || obfuscate || transpile ? 'html' : 'copied',
-      obfuscated: obfuscate,
+      kind: active || obfuscationLevel !== 'none' || transpile ? 'html' : 'copied',
+      obfuscated: obfuscationLevel !== 'none',
       transpiled: canTranspile(relativePath, config),
     };
   }
 
   if (extension === '.js' || extension === '.mjs' || extension === '.cjs') {
-    const minify = config.minify.js && minifyAllowed;
+    const minifyLevel = levelFor(relativePath, config.minify.js, config);
     const transpile = canTranspile(relativePath, config);
-    const aggressive = obfuscate && config.obfuscate.mode === 'aggressive';
     return {
       content: await transformJavaScript(
         source,
-        minify,
-        obfuscate,
-        aggressive,
+        minifyLevel,
+        obfuscationLevel,
         transpile,
         config.obfuscate.reservedNames,
         false,
       ),
-      kind: minify || obfuscate || transpile ? 'js' : 'copied',
-      obfuscated: obfuscate,
+      kind: minifyLevel !== 'none' || obfuscationLevel !== 'none' || transpile ? 'js' : 'copied',
+      obfuscated: obfuscationLevel !== 'none',
       transpiled: transpile,
     };
   }
 
   if (extension === '.css') {
-    const minify = config.minify.css && minifyAllowed;
+    const minifyLevel = levelFor(relativePath, config.minify.css, config);
     return {
-      content: minify ? transformCss(source) : source,
-      kind: minify ? 'css' : 'copied',
+      content: transformCss(source, minifyLevel),
+      kind: minifyLevel === 'none' ? 'copied' : 'css',
       obfuscated: false,
       transpiled: false,
     };

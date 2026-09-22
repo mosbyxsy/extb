@@ -119,14 +119,38 @@ test('uses safe configuration defaults', async () => {
     assert.equal(resolved.root, root);
     assert.equal(resolved.outDir, path.join(root, 'dist'));
     assert.deepEqual(
-      { enabled: resolved.minify.enabled, html: resolved.minify.html, js: resolved.minify.js, css: resolved.minify.css },
-      { enabled: true, html: true, js: true, css: true },
+      { level: resolved.minify.level, html: resolved.minify.html, js: resolved.minify.js, css: resolved.minify.css },
+      { level: 'safe', html: 'safe', js: 'safe', css: 'safe' },
     );
-    assert.equal(resolved.obfuscate.enabled, false);
-    assert.equal(resolved.obfuscate.mode, 'safe');
-    assert.deepEqual(resolved.transpile, { enabled: false, target: 'modern', exclude: [] });
+    assert.equal(resolved.obfuscate.level, 'none');
+    assert.deepEqual(resolved.transpile, { target: 'modern', exclude: [] });
     assert.deepEqual(resolved.transformExclude, []);
     assert.equal(resolved.zip.enabled, false);
+  });
+});
+
+test('rejects removed boolean, enabled, and mode configuration with migration guidance', async () => {
+  await withTemporaryDirectory(async (root) => {
+    await assert.rejects(
+      () => loadConfig({ cwd: root, configFile: false, overrides: { minify: false } }),
+      /minify 必须是压缩等级或对象/,
+    );
+    await assert.rejects(
+      () => loadConfig({ cwd: root, configFile: false, overrides: { minify: { enabled: false } } }),
+      /minify\.enabled 已移除/,
+    );
+    await assert.rejects(
+      () => loadConfig({ cwd: root, configFile: false, overrides: { obfuscate: { mode: 'safe' } } }),
+      /obfuscate\.enabled\/mode 已移除/,
+    );
+    await assert.rejects(
+      () => loadConfig({ cwd: root, configFile: false, overrides: { transpile: true } }),
+      /transpile 必须是 'modern'、'es5' 或对象/,
+    );
+    await assert.rejects(
+      () => loadConfig({ cwd: root, configFile: false, overrides: { transpile: { enabled: true } } }),
+      /transpile\.enabled 已移除/,
+    );
   });
 });
 
@@ -234,7 +258,7 @@ test('reports multiple manifests and accepts an explicit manifest', async () => 
       cwd: root,
       manifest: './two/manifest.json',
       outDir: './selected',
-      minify: false,
+      minify: 'none',
       zip: false,
     });
     assert.equal(result.sourceDir, path.join(root, 'two'));
@@ -355,18 +379,18 @@ test('loads TypeScript config and applies programmatic overrides', async () => {
       `export default {
         root: './extension',
         outDir: './from-config',
-        minify: false,
+        minify: 'none',
         zip: false,
       };`,
     );
     const loaded = await loadConfig({ cwd: root });
     assert.equal(loaded.root, path.join(root, 'extension'));
-    assert.equal(loaded.minify.js, false);
+    assert.equal(loaded.minify.js, 'none');
 
     const result = await build({
       cwd: root,
       outDir: './from-options',
-      minify: { js: true, html: false, css: false },
+      minify: { js: 'safe', html: 'none', css: 'none' },
     });
     assert.equal(result.outDir, path.join(root, 'from-options'));
     assert.equal(result.zipPath, undefined);
@@ -382,7 +406,7 @@ test('obfuscates local identifiers while preserving behavior and public names', 
     const result = await build({
       cwd: root,
       root: './extension',
-      obfuscate: { enabled: true, reservedNames: ['inputValue'] },
+      obfuscate: { level: 'safe', reservedNames: ['inputValue'] },
       zip: false,
     });
     const output = await readFile(path.join(result.outDir, 'scripts/background.js'), 'utf8');
@@ -426,7 +450,7 @@ test('transpiles modern JavaScript syntax to ES5 while preserving behavior', asy
       globalThis.inlineEs5Result = inlineModernFunction();</script>`,
     );
 
-    const result = await build({ cwd: root, root: './extension', transpile: true, zip: false });
+    const result = await build({ cwd: root, root: './extension', transpile: 'es5', zip: false });
     const output = await readFile(path.join(result.outDir, 'modern.js'), 'utf8');
     const htmlOutput = await readFile(path.join(result.outDir, 'popup.html'), 'utf8');
     assert.doesNotMatch(output, /\bconst\b|=>|\?\.|\?\?/);
@@ -465,7 +489,8 @@ test('supports aggressive compression and top-level identifier obfuscation', asy
     const result = await build({
       cwd: root,
       root: './extension',
-      obfuscate: { enabled: true, mode: 'aggressive' },
+      minify: { js: 'aggressive' },
+      obfuscate: { level: 'aggressive' },
       zip: false,
     });
     const output = await readFile(path.join(result.outDir, 'aggressive.js'), 'utf8');
@@ -475,6 +500,98 @@ test('supports aggressive compression and top-level identifier obfuscation', asy
     vm.runInContext(output, context);
     assert.equal(context.aggressiveResult, 8);
     assert.equal(result.files.obfuscated, 1);
+  });
+});
+
+test('keeps aggressive compression and aggressive obfuscation independently configurable', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await write(
+      extension,
+      'manifest.json',
+      JSON.stringify({
+        manifest_version: 3,
+        name: 'Independent Levels',
+        version: '1.0.0',
+        background: { service_worker: 'main.js' },
+      }),
+    );
+    await write(
+      extension,
+      'main.js',
+      `function calculatePublicResult(inputValue) {
+        const verboseLocalValue = inputValue * 2;
+        if (false) console.log('dead code');
+        return verboseLocalValue;
+      }
+      globalThis.result = calculatePublicResult(4);
+      globalThis.functionName = calculatePublicResult.name;`,
+    );
+
+    const compressed = await build({
+      cwd: root,
+      root: extension,
+      outDir: './compressed',
+      minify: { js: 'aggressive' },
+      obfuscate: 'none',
+    });
+    const compressedCode = await readFile(path.join(compressed.outDir, 'main.js'), 'utf8');
+    assert.doesNotMatch(compressedCode, /dead code/);
+    const compressedContext = vm.createContext({});
+    vm.runInContext(compressedCode, compressedContext);
+    assert.equal(compressedContext.result, 8);
+    assert.equal(compressedContext.functionName, 'calculatePublicResult');
+
+    const obfuscated = await build({
+      cwd: root,
+      root: extension,
+      outDir: './obfuscated',
+      minify: { js: 'none' },
+      obfuscate: 'aggressive',
+    });
+    const obfuscatedCode = await readFile(path.join(obfuscated.outDir, 'main.js'), 'utf8');
+    assert.match(obfuscatedCode, /dead code/);
+    assert.doesNotMatch(obfuscatedCode, /function calculatePublicResult/);
+    const obfuscatedContext = vm.createContext({});
+    vm.runInContext(obfuscatedCode, obfuscatedContext);
+    assert.equal(obfuscatedContext.result, 8);
+    assert.notEqual(obfuscatedContext.functionName, 'calculatePublicResult');
+  });
+});
+
+test('applies aggressive HTML and CSS optimization only at the aggressive level', async () => {
+  await withTemporaryDirectory(async (root) => {
+    const extension = path.join(root, 'extension');
+    await write(
+      extension,
+      'manifest.json',
+      JSON.stringify({
+        manifest_version: 3,
+        name: 'Markup Levels',
+        version: '1.0.0',
+        action: { default_popup: 'popup.html' },
+      }),
+    );
+    await write(
+      extension,
+      'popup.html',
+      '<!DOCTYPE html><link rel="stylesheet" type="text/css" href="style.css"><div class="a">A</div>',
+    );
+    await write(extension, 'style.css', '.a { color: red; } .b { color: red; }');
+
+    const safe = await build({ cwd: root, root: extension, outDir: './safe', minify: 'safe' });
+    const safeHtml = await readFile(path.join(safe.outDir, 'popup.html'), 'utf8');
+    const safeCss = await readFile(path.join(safe.outDir, 'style.css'), 'utf8');
+    assert.match(safeHtml, /type="text\/css"/);
+    assert.match(safeHtml, /class="a"/);
+    assert.doesNotMatch(safeCss, /\.a,\.b/);
+
+    const aggressive = await build({ cwd: root, root: extension, outDir: './aggressive', minify: 'aggressive' });
+    const aggressiveHtml = await readFile(path.join(aggressive.outDir, 'popup.html'), 'utf8');
+    const aggressiveCss = await readFile(path.join(aggressive.outDir, 'style.css'), 'utf8');
+    assert.doesNotMatch(aggressiveHtml, /type=/);
+    assert.match(aggressiveHtml, /class=a/);
+    assert.match(aggressiveCss, /\.a,\.b\{color:red\}/);
   });
 });
 
@@ -623,6 +740,56 @@ test('supports dry-run file listing and quiet successful builds in the CLI', asy
   });
 });
 
+test('parses optional processing levels without consuming the positional root', async () => {
+  let receivedOptions;
+  await assert.rejects(
+    () =>
+      runCli([process.execPath, 'extb', '--minify', 'extension'], {
+        commandName: 'extb',
+        build: async (options) => {
+          receivedOptions = options;
+          throw new Error('停止测试构建');
+        },
+      }),
+    /停止测试构建/,
+  );
+  assert.equal(receivedOptions.root, 'extension');
+  assert.deepEqual(receivedOptions.minify, { level: 'safe' });
+
+  await assert.rejects(
+    () =>
+      runCli(
+        [
+          process.execPath,
+          'extb',
+          'extension',
+          '--minify',
+          'aggressive',
+          '--minify-html',
+          'safe',
+          '--no-minify-js',
+          '--obfuscate',
+          'aggressive',
+        ],
+        {
+          commandName: 'extb',
+          build: async (options) => {
+            receivedOptions = options;
+            throw new Error('停止测试构建');
+          },
+        },
+      ),
+    /停止测试构建/,
+  );
+  assert.deepEqual(receivedOptions.minify, { level: 'aggressive', html: 'safe', js: 'none' });
+  assert.deepEqual(receivedOptions.obfuscate, { level: 'aggressive' });
+
+  await assert.rejects(
+    () => runCli([process.execPath, 'extb', 'extension', '--minify=invalid']),
+    /只能是 'none'、'safe' 或 'aggressive'/,
+  );
+});
+
 test('enables aggressive JavaScript processing and ES5 output through CLI flags', async () => {
   await withTemporaryDirectory(async (root) => {
     const extension = path.join(root, 'extension');
@@ -653,7 +820,10 @@ test('enables aggressive JavaScript processing and ES5 output through CLI flags'
         extension,
         '--out-dir',
         path.join(root, 'cli-js-output'),
-        '--aggressive-js',
+        '--minify-js',
+        'aggressive',
+        '--obfuscate',
+        'aggressive',
         '--target',
         'es5',
         '--no-zip',
@@ -715,8 +885,11 @@ test('rejects contradictory CLI flags before starting a build', async () => {
   };
   const conflicts = [
     ['--config', 'extb.config.ts', '--no-config'],
-    ['--aggressive-js', '--no-obfuscate'],
-    ['--aggressive-js', '--no-minify-js'],
+    ['--minify', 'safe', '--no-minify'],
+    ['--minify-html', 'safe', '--no-minify-html'],
+    ['--minify-js', 'aggressive', '--no-minify-js'],
+    ['--minify-css', 'safe', '--no-minify-css'],
+    ['--obfuscate', 'aggressive', '--no-obfuscate'],
     ['--zip-name', 'release.zip', '--no-zip'],
     ['--quiet', '--json'],
     ['--quiet', '--list-files'],
@@ -755,9 +928,12 @@ test('prints built-in defaults through an option without starting a build', asyn
   const defaults = JSON.parse(stdout);
   assert.equal(defaults.root, '.');
   assert.equal(defaults.outDir, './dist');
-  assert.equal(defaults.minify.enabled, true);
-  assert.equal(defaults.obfuscate.enabled, false);
-  assert.deepEqual(defaults.transpile, { enabled: false, target: 'modern', exclude: [] });
+  assert.deepEqual(
+    { level: defaults.minify.level, html: defaults.minify.html, js: defaults.minify.js, css: defaults.minify.css },
+    { level: 'safe', html: 'safe', js: 'safe', css: 'safe' },
+  );
+  assert.equal(defaults.obfuscate.level, 'none');
+  assert.deepEqual(defaults.transpile, { target: 'modern', exclude: [] });
   assert.deepEqual(defaults.zip, { enabled: false });
   assert.ok(defaults.exclude.includes('node_modules'));
   assert.equal(buildCalls, 0);
@@ -771,7 +947,7 @@ test('prints the merged final configuration without finding a manifest or starti
       JSON.stringify({
         outDir: './release',
         include: ['from-config/**'],
-        minify: false,
+        minify: 'none',
         zip: true,
       }),
     );
@@ -807,8 +983,8 @@ test('prints the merged final configuration without finding a manifest or starti
     assert.equal(resolved.configFile, configPath);
     assert.deepEqual(resolved.include, ['from-config/**', 'from-cli/**']);
     assert.deepEqual(
-      { enabled: resolved.minify.enabled, html: resolved.minify.html, js: resolved.minify.js, css: resolved.minify.css },
-      { enabled: true, html: false, js: true, css: false },
+      { level: resolved.minify.level, html: resolved.minify.html, js: resolved.minify.js, css: resolved.minify.css },
+      { level: 'none', html: 'none', js: 'safe', css: 'none' },
     );
     assert.equal(resolved.zip.enabled, false);
     assert.equal(buildCalls, 0);
@@ -856,6 +1032,12 @@ test('supports short and long command names with help and version flags', async 
   assert.match(stdout, /--dry-run/);
   assert.match(stdout, /--list-files/);
   assert.match(stdout, /--quiet/);
+  assert.match(stdout, /--minify \[level\]/);
+  assert.match(stdout, /--minify-html \[level\]/);
+  assert.match(stdout, /--minify-js \[level\]/);
+  assert.match(stdout, /--minify-css \[level\]/);
+  assert.match(stdout, /--obfuscate \[level\]/);
+  assert.doesNotMatch(stdout, /--aggressive-js/);
   assert.match(stdout, /--defaults\s+以 JSON 显示内置默认配置并退出/);
   assert.match(stdout, /--show-config\s+以 JSON 显示合并后的最终配置并退出/);
   assert.doesNotMatch(stdout, /--transpile/);
